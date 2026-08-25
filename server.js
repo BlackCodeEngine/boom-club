@@ -1,5 +1,6 @@
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
 
@@ -19,6 +20,7 @@ const SAFE_CELLS = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
 const ALLOWED_STAKES = [500, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000];
 const DEFAULT_STAKE = 1000;
 const TURN_TIME_LIMIT_MS = 15000;
+const RECONNECT_GRACE_MS = 30000;
 
 function createInitialTokens() {
   const tokens = {};
@@ -155,15 +157,18 @@ function broadcastState(room, extra) {
 io.on('connection', (socket) => {
   socket.on('createRoom', ({ name, stake, coins }) => {
     const code = generateRoomCode();
+    const playerId = crypto.randomUUID();
     const room = {
       code,
       stake: ALLOWED_STAKES.includes(stake) ? stake : DEFAULT_STAKE,
       players: [{
         id: socket.id,
+        playerId,
         name: (name || 'Spieler 1').slice(0, 16),
         color: null,
         connected: true,
         coins: typeof coins === 'number' ? coins : null,
+        disconnectTimerHandle: null,
       }],
       turnIndex: 0,
       dice: null,
@@ -178,7 +183,7 @@ io.on('connection', (socket) => {
     rooms.set(code, room);
     socket.join(code);
     socket.data.roomCode = code;
-    socket.emit('roomCreated', { code, state: publicState(room) });
+    socket.emit('roomCreated', { code, playerId, state: publicState(room) });
   });
 
   socket.on('joinRoom', ({ code, name, coins }) => {
@@ -191,16 +196,46 @@ io.on('connection', (socket) => {
       socket.emit('errorMsg', 'Raum ist bereits voll.');
       return;
     }
+    const playerId = crypto.randomUUID();
     room.players.push({
       id: socket.id,
+      playerId,
       name: (name || 'Spieler 2').slice(0, 16),
       color: null,
       connected: true,
       coins: typeof coins === 'number' ? coins : null,
+      disconnectTimerHandle: null,
     });
     socket.join(room.code);
     socket.data.roomCode = room.code;
-    socket.emit('roomJoined', { state: publicState(room) });
+    socket.emit('roomJoined', { playerId, state: publicState(room) });
+    broadcastState(room);
+  });
+
+  socket.on('rejoinRoom', ({ code, playerId }) => {
+    const room = rooms.get((code || '').toUpperCase());
+    if (!room) {
+      socket.emit('rejoinFailed', { reason: 'room_not_found' });
+      return;
+    }
+    const player = room.players.find((p) => p.playerId === playerId);
+    if (!player) {
+      socket.emit('rejoinFailed', { reason: 'player_not_found' });
+      return;
+    }
+
+    if (player.disconnectTimerHandle) {
+      clearTimeout(player.disconnectTimerHandle);
+      player.disconnectTimerHandle = null;
+    }
+    player.id = socket.id;
+    player.connected = true;
+
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+    socket.data.playerId = playerId;
+
+    socket.emit('rejoined', { state: publicState(room), color: player.color, stake: room.stake });
     broadcastState(room);
   });
 
@@ -299,13 +334,31 @@ io.on('connection', (socket) => {
     const room = rooms.get(code);
     if (!room) return;
     const player = room.players.find((p) => p.id === socket.id);
-    if (player) player.connected = false;
+    if (!player) return;
 
-    clearTurnTimer(room);
-    if (!room.winner) {
-      io.to(room.code).emit('opponentLeft', { name: player ? player.name : 'Der Gegner' });
+    player.connected = false;
+    broadcastState(room);
+
+    // Game already over - no point keeping the room alive for a reconnect.
+    if (room.winner) {
+      clearTurnTimer(room);
+      rooms.delete(code);
+      return;
     }
-    rooms.delete(code);
+
+    // Grace period: a short network blip (e.g. phone switching Wi-Fi/mobile
+    // data) shouldn't end the game immediately. The room stays alive until
+    // the timer runs out, giving the player a chance to reconnect via
+    // 'rejoinRoom'. The per-turn timer keeps running independently, so the
+    // game doesn't stall even if it was the disconnected player's turn.
+    if (player.disconnectTimerHandle) clearTimeout(player.disconnectTimerHandle);
+    player.disconnectTimerHandle = setTimeout(() => {
+      if (!rooms.has(room.code)) return; // already cleaned up
+      if (player.connected) return; // reconnected in the meantime
+      clearTurnTimer(room);
+      io.to(room.code).emit('opponentLeft', { name: player.name });
+      rooms.delete(room.code);
+    }, RECONNECT_GRACE_MS);
   });
 });
 

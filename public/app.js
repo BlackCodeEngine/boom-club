@@ -56,6 +56,25 @@ function setPlayerName(name) {
   localStorage.setItem(NAME_KEY, name.trim());
 }
 
+// --- Reconnect info (persisted) -----------------------------------------------
+// Lets the client rejoin an in-progress online room (same code + playerId)
+// after a page reload or a dropped connection, instead of losing the game.
+const RECONNECT_KEY = 'boomclub_reconnect';
+function saveReconnectInfo(code, playerId) {
+  localStorage.setItem(RECONNECT_KEY, JSON.stringify({ code, playerId }));
+}
+function getReconnectInfo() {
+  try {
+    const raw = localStorage.getItem(RECONNECT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function clearReconnectInfo() {
+  localStorage.removeItem(RECONNECT_KEY);
+}
+
 // --- BoomCoins wallet (persisted) ---------------------------------------------
 const COINS_KEY = 'boomclub_coins';
 const DEFAULT_COINS = 10000;
@@ -143,6 +162,7 @@ const colorSelectError = document.getElementById('color-select-error');
 const coinsDisplayEl = document.getElementById('coins-display');
 const stakeSelectEl = document.getElementById('stake-select');
 const waitingStakeEl = document.getElementById('waiting-stake');
+const reconnectBannerEl = document.getElementById('reconnect-banner');
 
 const CELL = canvas.width / GRID;
 
@@ -165,9 +185,78 @@ let localTurnTimeoutHandle = null;
 let wasMyTurnPrev = null; // null = unknown/not yet in a game
 let audioCtx = null;
 
+let hasConnectedOnce = false;
+
 renderCoins();
 
 btnRefreshApp.addEventListener('click', () => location.reload());
+
+// --- Reconnect banner -----------------------------------------------------------
+function showReconnectBanner(text) {
+  reconnectBannerEl.textContent = text || '🔌 Verbindung unterbrochen – versuche wiederzuverbinden...';
+  reconnectBannerEl.classList.remove('hidden');
+}
+function hideReconnectBanner() {
+  reconnectBannerEl.classList.add('hidden');
+}
+
+// A dropped connection during an online game should try to recover, not dump
+// the player back into the main menu. socket.io reconnects the transport on
+// its own; we just have to re-associate it with our room via 'rejoinRoom'
+// once it's back (a fresh socket.id is no longer known to the server).
+socket.on('connect', () => {
+  if (hasConnectedOnce && gameMode === 'online') {
+    const info = getReconnectInfo();
+    if (info) {
+      showReconnectBanner('✅ Verbindung wiederhergestellt – synchronisiere...');
+      socket.emit('rejoinRoom', info);
+    } else {
+      hideReconnectBanner();
+    }
+  }
+  hasConnectedOnce = true;
+});
+
+socket.on('disconnect', (reason) => {
+  if (reason === 'io client disconnect') return; // we disconnected on purpose
+  if (gameMode === 'online') {
+    showReconnectBanner();
+  }
+});
+
+socket.on('rejoined', ({ state, color, stake }) => {
+  hideReconnectBanner();
+  gameMode = 'online';
+  myColor = color;
+  currentStake = stake;
+
+  if (state.started) {
+    commitOnlineState(state);
+    showScreen('game');
+  } else if (color) {
+    waitingCode.textContent = state.code;
+    waitingStakeEl.textContent = stake ? `Einsatz: ${formatBC(stake)} BC` : '';
+    showScreen('waiting');
+  } else {
+    const taken = state.players.filter((p) => p.color).map((p) => p.color);
+    openColorSelect('online', taken);
+  }
+});
+
+socket.on('rejoinFailed', () => {
+  hideReconnectBanner();
+  clearReconnectInfo();
+});
+
+// Returning to the page (e.g. after the in-app refresh, or reopening the
+// iPhone homescreen app) with a saved room to rejoin.
+const initialReconnectInfo = getReconnectInfo();
+if (initialReconnectInfo) {
+  gameMode = 'online';
+  showReconnectBanner('🔌 Verbindung wird wiederhergestellt...');
+  ensureConnected();
+  socket.emit('rejoinRoom', initialReconnectInfo);
+}
 
 function showScreen(name) {
   Object.entries(screens).forEach(([key, el]) => {
@@ -207,6 +296,8 @@ function leaveAndGoToMenu() {
   if (gameMode === 'online' && socket.connected) {
     socket.disconnect();
   }
+  clearReconnectInfo();
+  hideReconnectBanner();
   gameMode = null;
   myColor = null;
   currentState = null;
@@ -305,13 +396,14 @@ btnCopyCode.addEventListener('click', () => {
 btnRestart.addEventListener('click', () => window.location.reload());
 
 // --- Socket events (online multiplayer) ---------------------------------------
-socket.on('roomCreated', ({ state }) => {
+socket.on('roomCreated', ({ code, playerId, state }) => {
+  saveReconnectInfo(code, playerId);
   currentStake = state.stake;
   const taken = state.players.filter((p) => p.color).map((p) => p.color);
   openColorSelect('online', taken);
 });
 
-socket.on('roomJoined', ({ state }) => {
+socket.on('roomJoined', ({ playerId, state }) => {
   if (getCoins() < state.stake) {
     landingError.textContent = `Nicht genug BoomCoins für den Einsatz von ${formatBC(state.stake)} BC in diesem Raum.`;
     socket.disconnect();
@@ -319,6 +411,7 @@ socket.on('roomJoined', ({ state }) => {
     showScreen('onlineMenu');
     return;
   }
+  saveReconnectInfo(state.code, playerId);
   currentStake = state.stake;
   const taken = state.players.filter((p) => p.color).map((p) => p.color);
   openColorSelect('online', taken);
@@ -356,6 +449,8 @@ socket.on('state', (state) => {
 });
 
 socket.on('opponentLeft', ({ name }) => {
+  hideReconnectBanner();
+  clearReconnectInfo();
   let text = `${name} hat das Spiel verlassen.`;
   if (gameMode === 'online' && stakeDeducted && !payoutSettled && currentStake) {
     payoutSettled = true;
@@ -406,6 +501,10 @@ function commitOnlineState(state) {
         extra = ` Du verlierst deinen Einsatz von ${formatBC(currentStake)} BC.`;
       }
     }
+  }
+
+  if (gameMode === 'online' && state.winner) {
+    clearReconnectInfo();
   }
 
   applyState(state);
