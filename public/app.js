@@ -56,6 +56,34 @@ function setPlayerName(name) {
   localStorage.setItem(NAME_KEY, name.trim());
 }
 
+// --- BoomCoins wallet (persisted) ---------------------------------------------
+const COINS_KEY = 'boomclub_coins';
+const DEFAULT_COINS = 10000;
+const ALLOWED_STAKES = [500, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000];
+
+function getCoins() {
+  const raw = localStorage.getItem(COINS_KEY);
+  if (raw === null) {
+    localStorage.setItem(COINS_KEY, String(DEFAULT_COINS));
+    return DEFAULT_COINS;
+  }
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : DEFAULT_COINS;
+}
+function setCoins(amount) {
+  localStorage.setItem(COINS_KEY, String(Math.max(0, Math.round(amount))));
+  renderCoins();
+}
+function addCoins(delta) {
+  setCoins(getCoins() + delta);
+}
+function formatBC(n) {
+  return n.toLocaleString('de-DE');
+}
+function renderCoins() {
+  coinsDisplayEl.textContent = formatBC(getCoins());
+}
+
 // --- DOM references ---------------------------------------------------------
 const screens = {
   mainMenu: document.getElementById('main-menu'),
@@ -103,6 +131,10 @@ const colorSelectSubtitle = document.getElementById('color-select-subtitle');
 const colorCardsEl = document.getElementById('color-cards');
 const colorSelectError = document.getElementById('color-select-error');
 
+const coinsDisplayEl = document.getElementById('coins-display');
+const stakeSelectEl = document.getElementById('stake-select');
+const waitingStakeEl = document.getElementById('waiting-stake');
+
 const CELL = canvas.width / GRID;
 
 let myColor = null;
@@ -113,6 +145,12 @@ let localState = null; // only used in solo mode
 let toastTimer = null;
 let isAnimating = false;
 let animatingTokenInfo = null; // { color, idx, cell: [row, col] }
+
+let currentStake = null;
+let stakeDeducted = false;
+let payoutSettled = false;
+
+renderCoins();
 
 function showScreen(name) {
   Object.entries(screens).forEach(([key, el]) => {
@@ -156,6 +194,9 @@ function leaveAndGoToMenu() {
   myColor = null;
   currentState = null;
   localState = null;
+  currentStake = null;
+  stakeDeducted = false;
+  payoutSettled = false;
   isAnimating = false;
   animatingTokenInfo = null;
   gameoverSection.classList.add('hidden');
@@ -173,7 +214,8 @@ function openColorSelect(context, takenColors) {
   colorSelectContext = context;
   colorSelectError.textContent = '';
   if (context === 'online') {
-    colorSelectSubtitle.textContent = 'Bereits vergebene Farben sind ausgegraut.';
+    const stakeInfo = currentStake ? `Einsatz: ${formatBC(currentStake)} BC · ` : '';
+    colorSelectSubtitle.textContent = `${stakeInfo}Bereits vergebene Farben sind ausgegraut.`;
   }
   renderColorSelect(takenColors || []);
   showScreen('colorSelect');
@@ -206,9 +248,17 @@ function handleColorPick(color) {
 // --- Online menu actions --------------------------------------------------------
 btnCreate.addEventListener('click', () => {
   landingError.textContent = '';
+  const stake = parseInt(stakeSelectEl.value, 10);
+  if (!ALLOWED_STAKES.includes(stake)) return;
+  if (getCoins() < stake) {
+    landingError.textContent = `Nicht genug BoomCoins für diesen Einsatz (benötigt: ${formatBC(stake)} BC).`;
+    return;
+  }
   ensureConnected();
   gameMode = 'online';
-  socket.emit('createRoom', { name: getPlayerName() });
+  stakeDeducted = false;
+  payoutSettled = false;
+  socket.emit('createRoom', { name: getPlayerName(), stake });
 });
 
 btnJoin.addEventListener('click', () => {
@@ -220,6 +270,8 @@ btnJoin.addEventListener('click', () => {
   landingError.textContent = '';
   ensureConnected();
   gameMode = 'online';
+  stakeDeducted = false;
+  payoutSettled = false;
   socket.emit('joinRoom', { code, name: getPlayerName() });
 });
 
@@ -233,11 +285,20 @@ btnRestart.addEventListener('click', () => window.location.reload());
 
 // --- Socket events (online multiplayer) ---------------------------------------
 socket.on('roomCreated', ({ state }) => {
+  currentStake = state.stake;
   const taken = state.players.filter((p) => p.color).map((p) => p.color);
   openColorSelect('online', taken);
 });
 
 socket.on('roomJoined', ({ state }) => {
+  if (getCoins() < state.stake) {
+    landingError.textContent = `Nicht genug BoomCoins für den Einsatz von ${formatBC(state.stake)} BC in diesem Raum.`;
+    socket.disconnect();
+    gameMode = null;
+    showScreen('onlineMenu');
+    return;
+  }
+  currentStake = state.stake;
   const taken = state.players.filter((p) => p.color).map((p) => p.color);
   openColorSelect('online', taken);
 });
@@ -245,10 +306,10 @@ socket.on('roomJoined', ({ state }) => {
 socket.on('colorConfirmed', ({ color, state }) => {
   myColor = color;
   if (state.started) {
-    showScreen('game');
-    applyState(state);
+    commitOnlineState(state);
   } else {
     waitingCode.textContent = state.code;
+    waitingStakeEl.textContent = currentStake ? `Einsatz: ${formatBC(currentStake)} BC` : '';
     showScreen('waiting');
   }
 });
@@ -269,13 +330,18 @@ socket.on('state', (state) => {
   if (state.moveInfo) {
     animateIncomingMove(state);
   } else {
-    applyState(state);
-    if (state.message) showToast(state.message);
+    commitOnlineState(state);
   }
 });
 
 socket.on('opponentLeft', ({ name }) => {
-  gameoverText.textContent = `${name} hat das Spiel verlassen.`;
+  let text = `${name} hat das Spiel verlassen.`;
+  if (gameMode === 'online' && stakeDeducted && !payoutSettled && currentStake) {
+    payoutSettled = true;
+    addCoins(currentStake);
+    text += ` Dein Einsatz von ${formatBC(currentStake)} BC wurde zurückerstattet.`;
+  }
+  gameoverText.textContent = text;
   gameoverSection.classList.remove('hidden');
 });
 
@@ -288,8 +354,7 @@ function animateIncomingMove(state) {
   const { color, tokenIndex, diceValue } = state.moveInfo;
   const bgState = currentState;
   if (!bgState) {
-    applyState(state);
-    if (state.message) showToast(state.message);
+    commitOnlineState(state);
     return;
   }
   const fromD = bgState.tokens[color][tokenIndex];
@@ -297,9 +362,35 @@ function animateIncomingMove(state) {
   isAnimating = true;
   animateTokenMove(color, tokenIndex, path, bgState, () => {
     isAnimating = false;
-    applyState(state);
-    if (state.message) showToast(state.message);
+    commitOnlineState(state);
   });
+}
+
+// Applies an authoritative online state update and settles the BoomCoins
+// stake exactly once per game (deducted on start, paid out to the winner).
+function commitOnlineState(state) {
+  applyState(state);
+
+  let extra = '';
+  if (gameMode === 'online' && currentStake) {
+    if (!stakeDeducted && state.started) {
+      stakeDeducted = true;
+      addCoins(-currentStake);
+    }
+    if (!payoutSettled && state.winner) {
+      payoutSettled = true;
+      const pot = currentStake * 2;
+      if (state.winner === myColor) {
+        addCoins(pot);
+        extra = ` Du gewinnst den Pot: +${formatBC(pot)} BC! 🪙`;
+      } else {
+        extra = ` Du verlierst deinen Einsatz von ${formatBC(currentStake)} BC.`;
+      }
+    }
+  }
+
+  const msg = `${state.message || ''}${extra}`.trim();
+  if (msg) showToast(msg);
 }
 
 // --- Shared dice animation -----------------------------------------------------
@@ -327,7 +418,7 @@ function applyState(state) {
     gameRoomLabel.textContent = 'Modus:';
     gameRoomCode.textContent = 'Solo';
   } else {
-    gameModeLabel.textContent = 'Online Multiplayer';
+    gameModeLabel.textContent = currentStake ? `Online · Einsatz ${formatBC(currentStake)} BC` : 'Online Multiplayer';
     gameRoomLabel.textContent = 'Raum:';
     gameRoomCode.textContent = state.code;
   }
@@ -576,7 +667,12 @@ function finalizeLocalMove(color, diceValue, captured, finished) {
     localState.dice = null;
     localState.validMoves = [];
     applyState(localState);
-    showToast(`${playerLabel(color)} hat gewonnen!`);
+    if (color === myColor) {
+      addCoins(1000);
+      showToast(`${playerLabel(color)} hat gewonnen! +1.000 BC 🪙`);
+    } else {
+      showToast(`${playerLabel(color)} hat gewonnen!`);
+    }
     return;
   }
 
@@ -755,6 +851,56 @@ function drawCenter() {
   ctx.restore();
 }
 
+// --- Pawn rendering ("Mensch ärgere dich nicht" style: round head + cone body) --
+function drawPawn(cx, cy, radius, color) {
+  const bodyHalfBottom = radius * 0.95;
+  const bodyHalfTop = radius * 0.5;
+  const bodyBottomY = cy + radius * 0.85;
+  const bodyTopY = cy - radius * 0.05;
+  const headCy = cy - radius * 0.75;
+  const headR = radius * 0.58;
+
+  // ground shadow
+  ctx.beginPath();
+  ctx.ellipse(cx, bodyBottomY, bodyHalfBottom * 1.05, radius * 0.22, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.fill();
+
+  // conical/cylindrical body
+  ctx.beginPath();
+  ctx.moveTo(cx - bodyHalfBottom, bodyBottomY);
+  ctx.lineTo(cx + bodyHalfBottom, bodyBottomY);
+  ctx.lineTo(cx + bodyHalfTop, bodyTopY);
+  ctx.lineTo(cx - bodyHalfTop, bodyTopY);
+  ctx.closePath();
+  const bodyGrad = ctx.createLinearGradient(cx, bodyTopY, cx, bodyBottomY);
+  bodyGrad.addColorStop(0, LIGHT_TINT[color]);
+  bodyGrad.addColorStop(1, COLOR_HEX[color]);
+  ctx.fillStyle = bodyGrad;
+  ctx.fill();
+  ctx.lineWidth = Math.max(1, radius * 0.14);
+  ctx.strokeStyle = COLOR_DARK[color];
+  ctx.stroke();
+
+  // round head
+  ctx.beginPath();
+  ctx.arc(cx, headCy, headR, 0, Math.PI * 2);
+  const headGrad = ctx.createRadialGradient(cx - headR * 0.3, headCy - headR * 0.3, headR * 0.1, cx, headCy, headR);
+  headGrad.addColorStop(0, LIGHT_TINT[color]);
+  headGrad.addColorStop(1, COLOR_HEX[color]);
+  ctx.fillStyle = headGrad;
+  ctx.fill();
+  ctx.lineWidth = Math.max(1, radius * 0.14);
+  ctx.strokeStyle = COLOR_DARK[color];
+  ctx.stroke();
+
+  // shine highlight
+  ctx.beginPath();
+  ctx.arc(cx - headR * 0.35, headCy - headR * 0.35, headR * 0.28, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fill();
+}
+
 // --- Token positioning & drawing -----------------------------------------------
 function tokenCell(color, dist) {
   if (dist === -1) return null; // handled separately via base slot
@@ -811,24 +957,13 @@ function drawTokens(state) {
       if (highlight) {
         ctx.save();
         ctx.beginPath();
-        ctx.arc(cx, cy, radius + 5, 0, Math.PI * 2);
+        ctx.arc(cx, cy, radius + 6, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(255,255,255,0.35)';
         ctx.fill();
         ctx.restore();
       }
 
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = COLOR_HEX[t.color];
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = COLOR_DARK[t.color];
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(cx - radius * 0.3, cy - radius * 0.3, radius * 0.3, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.5)';
-      ctx.fill();
+      drawPawn(cx, cy, radius, t.color);
     });
   });
 
@@ -855,7 +990,7 @@ function buildHitboxes(groups) {
       const cx = x + w / 2 + ox;
       const cy = y + h / 2 + oy;
       const radius = n > 1 ? w * 0.2 : w * 0.32;
-      hitboxes.push({ cx, cy, radius: radius + 6, color: t.color, idx: t.idx });
+      hitboxes.push({ cx, cy, radius: radius + 8, color: t.color, idx: t.idx });
     });
   });
 }

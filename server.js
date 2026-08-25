@@ -16,6 +16,8 @@ const RING_LENGTH = 52;
 const COLORS_ALL = ['red', 'blue', 'yellow', 'green'];
 const START_OFFSET = { red: 0, green: 13, yellow: 26, blue: 39 };
 const SAFE_CELLS = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
+const ALLOWED_STAKES = [500, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000];
+const DEFAULT_STAKE = 1000;
 
 function createInitialTokens() {
   const tokens = {};
@@ -97,6 +99,7 @@ function generateRoomCode() {
 function publicState(room) {
   return {
     code: room.code,
+    stake: room.stake,
     players: room.players.map((p) => ({ name: p.name, color: p.color, connected: p.connected })),
     tokens: room.tokens,
     turn: room.players[room.turnIndex] ? room.players[room.turnIndex].color : null,
@@ -124,10 +127,11 @@ function broadcastState(room, extra) {
 }
 
 io.on('connection', (socket) => {
-  socket.on('createRoom', ({ name }) => {
+  socket.on('createRoom', ({ name, stake }) => {
     const code = generateRoomCode();
     const room = {
       code,
+      stake: ALLOWED_STAKES.includes(stake) ? stake : DEFAULT_STAKE,
       players: [{ id: socket.id, name: (name || 'Spieler 1').slice(0, 16), color: null, connected: true }],
       turnIndex: 0,
       dice: null,
