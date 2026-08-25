@@ -22,19 +22,29 @@ const RING_PATH = [
 ];
 const HOME_PATHS = {
   red: [[7, 1], [7, 2], [7, 3], [7, 4], [7, 5], [7, 6]],
+  green: [[1, 7], [2, 7], [3, 7], [4, 7], [5, 7], [6, 7]],
   yellow: [[7, 13], [7, 12], [7, 11], [7, 10], [7, 9], [7, 8]],
+  blue: [[13, 7], [12, 7], [11, 7], [10, 7], [9, 7], [8, 7]],
 };
 const BASE_SPOTS = {
   red: [[1, 1], [1, 4], [4, 1], [4, 4]],
+  green: [[1, 10], [1, 13], [4, 10], [4, 13]],
   yellow: [[10, 10], [10, 13], [13, 10], [13, 13]],
+  blue: [[10, 1], [10, 4], [13, 1], [13, 4]],
 };
 const RING_LENGTH = 52;
-const START_OFFSET = { red: 0, yellow: 26 };
+const START_OFFSET = { red: 0, green: 13, yellow: 26, blue: 39 };
 const SAFE_CELLS = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
-const COLOR_HEX = { red: '#ef4444', yellow: '#facc15' };
+const COLOR_HEX = { red: '#ef4444', blue: '#3b82f6', yellow: '#facc15', green: '#22c55e' };
+const COLOR_DARK = { red: '#7f1d1d', blue: '#1e3a8a', yellow: '#854d0e', green: '#14532d' };
+const COLOR_LABELS = { red: 'Rot', blue: 'Blau', yellow: 'Gelb', green: 'Grün' };
+const ALL_COLORS = ['red', 'blue', 'yellow', 'green'];
 
-function otherColor(color) {
-  return color === 'red' ? 'yellow' : 'red';
+function COLORS() { return ALL_COLORS; }
+
+function opponentColorOf(state, color) {
+  const other = state.players.find((p) => p.color !== color);
+  return other ? other.color : null;
 }
 
 // --- Player name (persisted) -------------------------------------------------
@@ -51,6 +61,7 @@ const screens = {
   mainMenu: document.getElementById('main-menu'),
   onlineMenu: document.getElementById('online-menu'),
   settings: document.getElementById('settings'),
+  colorSelect: document.getElementById('color-select'),
   waiting: document.getElementById('waiting'),
   game: document.getElementById('game'),
 };
@@ -64,8 +75,10 @@ const btnWaitingCancel = document.getElementById('btn-waiting-cancel');
 const gameRoomLabel = document.getElementById('game-room-label');
 const gameRoomCode = document.getElementById('game-room-code');
 const gameModeLabel = document.getElementById('game-mode-label');
-const nameRedEl = document.getElementById('name-red');
-const nameYellowEl = document.getElementById('name-yellow');
+const namePlayer1El = document.getElementById('name-player1');
+const namePlayer2El = document.getElementById('name-player2');
+const dotPlayer1El = document.getElementById('dot-player1');
+const dotPlayer2El = document.getElementById('dot-player2');
 const turnBanner = document.getElementById('turn-banner');
 const canvas = document.getElementById('board-canvas');
 const ctx = canvas.getContext('2d');
@@ -85,13 +98,21 @@ const btnSettingsBack = document.getElementById('btn-settings-back');
 const settingsNameInput = document.getElementById('settings-name-input');
 const btnBackToMenu = document.getElementById('btn-back-to-menu');
 
+const btnColorSelectBack = document.getElementById('btn-colorselect-back');
+const colorSelectSubtitle = document.getElementById('color-select-subtitle');
+const colorCardsEl = document.getElementById('color-cards');
+const colorSelectError = document.getElementById('color-select-error');
+
 const CELL = canvas.width / GRID;
 
 let myColor = null;
-let gameMode = null; // 'solo' | 'online'
+let gameMode = null; // 'solo' | 'solo-pending' | 'online'
+let colorSelectContext = null; // 'solo' | 'online'
 let currentState = null;
 let localState = null; // only used in solo mode
 let toastTimer = null;
+let isAnimating = false;
+let animatingTokenInfo = null; // { color, idx, cell: [row, col] }
 
 function showScreen(name) {
   Object.entries(screens).forEach(([key, el]) => {
@@ -110,7 +131,11 @@ function showToast(msg) {
 settingsNameInput.value = getPlayerName();
 settingsNameInput.addEventListener('input', () => setPlayerName(settingsNameInput.value));
 
-btnNavSolo.addEventListener('click', () => startSoloGame());
+btnNavSolo.addEventListener('click', () => {
+  gameMode = 'solo-pending';
+  colorSelectSubtitle.textContent = 'Der Boom-Bot bekommt automatisch eine der übrigen Farben.';
+  openColorSelect('solo', []);
+});
 btnNavOnline.addEventListener('click', () => {
   landingError.textContent = '';
   showScreen('onlineMenu');
@@ -121,6 +146,7 @@ btnOnlineBack.addEventListener('click', () => showScreen('mainMenu'));
 btnSettingsBack.addEventListener('click', () => showScreen('mainMenu'));
 btnWaitingCancel.addEventListener('click', () => leaveAndGoToMenu());
 btnBackToMenu.addEventListener('click', () => leaveAndGoToMenu());
+btnColorSelectBack.addEventListener('click', () => leaveAndGoToMenu());
 
 function leaveAndGoToMenu() {
   if (gameMode === 'online' && socket.connected) {
@@ -130,6 +156,8 @@ function leaveAndGoToMenu() {
   myColor = null;
   currentState = null;
   localState = null;
+  isAnimating = false;
+  animatingTokenInfo = null;
   gameoverSection.classList.add('hidden');
   messageToast.textContent = '';
   drawBoard(null);
@@ -138,6 +166,41 @@ function leaveAndGoToMenu() {
 
 function ensureConnected() {
   if (!socket.connected) socket.connect();
+}
+
+// --- Color selection screen ----------------------------------------------------
+function openColorSelect(context, takenColors) {
+  colorSelectContext = context;
+  colorSelectError.textContent = '';
+  if (context === 'online') {
+    colorSelectSubtitle.textContent = 'Bereits vergebene Farben sind ausgegraut.';
+  }
+  renderColorSelect(takenColors || []);
+  showScreen('colorSelect');
+}
+
+function renderColorSelect(takenColors) {
+  colorCardsEl.innerHTML = '';
+  ALL_COLORS.forEach((color) => {
+    const taken = takenColors.includes(color);
+    const card = document.createElement('button');
+    card.className = 'color-card';
+    card.disabled = taken;
+    card.style.setProperty('--card-color', COLOR_HEX[color]);
+    card.innerHTML = `<span class="color-swatch"></span><span>${COLOR_LABELS[color]}</span>` +
+      (taken ? '<span class="taken-label">vergeben</span>' : '');
+    card.addEventListener('click', () => handleColorPick(color));
+    colorCardsEl.appendChild(card);
+  });
+}
+
+function handleColorPick(color) {
+  if (colorSelectContext === 'solo') {
+    startSoloGame(color);
+  } else if (colorSelectContext === 'online') {
+    colorSelectError.textContent = '';
+    socket.emit('selectColor', { color });
+  }
 }
 
 // --- Online menu actions --------------------------------------------------------
@@ -169,21 +232,25 @@ btnCopyCode.addEventListener('click', () => {
 btnRestart.addEventListener('click', () => window.location.reload());
 
 // --- Socket events (online multiplayer) ---------------------------------------
-socket.on('roomCreated', ({ code, color, state }) => {
-  myColor = color;
-  waitingCode.textContent = code;
-  showScreen('waiting');
-  applyState(state);
+socket.on('roomCreated', ({ state }) => {
+  const taken = state.players.filter((p) => p.color).map((p) => p.color);
+  openColorSelect('online', taken);
 });
 
-socket.on('roomJoined', ({ color, state }) => {
-  myColor = color;
-  applyState(state);
+socket.on('roomJoined', ({ state }) => {
+  const taken = state.players.filter((p) => p.color).map((p) => p.color);
+  openColorSelect('online', taken);
 });
 
-socket.on('gameStart', (state) => {
-  showScreen('game');
-  applyState(state);
+socket.on('colorConfirmed', ({ color, state }) => {
+  myColor = color;
+  if (state.started) {
+    showScreen('game');
+    applyState(state);
+  } else {
+    waitingCode.textContent = state.code;
+    showScreen('waiting');
+  }
 });
 
 socket.on('diceRolled', ({ value }) => {
@@ -191,8 +258,20 @@ socket.on('diceRolled', ({ value }) => {
 });
 
 socket.on('state', (state) => {
-  applyState(state);
-  if (state.message) showToast(state.message);
+  if (!state.started) {
+    // lobby-phase update (e.g. opponent joined or picked a color while we wait)
+    if (!screens.colorSelect.classList.contains('hidden')) {
+      const taken = state.players.filter((p) => p.color && p.color !== myColor).map((p) => p.color);
+      renderColorSelect(taken);
+    }
+    return;
+  }
+  if (state.moveInfo) {
+    animateIncomingMove(state);
+  } else {
+    applyState(state);
+    if (state.message) showToast(state.message);
+  }
 });
 
 socket.on('opponentLeft', ({ name }) => {
@@ -202,7 +281,26 @@ socket.on('opponentLeft', ({ name }) => {
 
 socket.on('errorMsg', (msg) => {
   landingError.textContent = msg;
+  colorSelectError.textContent = msg;
 });
+
+function animateIncomingMove(state) {
+  const { color, tokenIndex, diceValue } = state.moveInfo;
+  const bgState = currentState;
+  if (!bgState) {
+    applyState(state);
+    if (state.message) showToast(state.message);
+    return;
+  }
+  const fromD = bgState.tokens[color][tokenIndex];
+  const path = computeStepPath(color, fromD, diceValue);
+  isAnimating = true;
+  animateTokenMove(color, tokenIndex, path, bgState, () => {
+    isAnimating = false;
+    applyState(state);
+    if (state.message) showToast(state.message);
+  });
+}
 
 // --- Shared dice animation -----------------------------------------------------
 function animateDiceRoll(finalValue, onDone) {
@@ -234,10 +332,12 @@ function applyState(state) {
     gameRoomCode.textContent = state.code;
   }
 
-  const redPlayer = state.players.find((p) => p.color === 'red');
-  const yellowPlayer = state.players.find((p) => p.color === 'yellow');
-  nameRedEl.textContent = redPlayer ? redPlayer.name : 'Rot';
-  nameYellowEl.textContent = yellowPlayer ? yellowPlayer.name : 'Gelb';
+  const p1 = state.players[0];
+  const p2 = state.players[1];
+  namePlayer1El.textContent = p1 ? p1.name : 'Spieler 1';
+  namePlayer2El.textContent = p2 ? p2.name : 'Spieler 2';
+  dotPlayer1El.style.background = p1 && p1.color ? COLOR_HEX[p1.color] : 'transparent';
+  dotPlayer2El.style.background = p2 && p2.color ? COLOR_HEX[p2.color] : 'transparent';
 
   if (state.started) {
     showScreen('game');
@@ -247,8 +347,9 @@ function applyState(state) {
   btnDice.disabled = !(isMyTurn && state.dice === null && !state.winner);
 
   if (state.winner) {
-    const winnerName = state.winner === 'red' ? nameRedEl.textContent : nameYellowEl.textContent;
-    gameoverText.textContent = `🎉 ${winnerName} (${state.winner === 'red' ? 'Rot' : 'Gelb'}) gewinnt!`;
+    const winnerPlayer = state.players.find((p) => p.color === state.winner);
+    const winnerName = winnerPlayer ? winnerPlayer.name : COLOR_LABELS[state.winner];
+    gameoverText.textContent = `🎉 ${winnerName} (${COLOR_LABELS[state.winner]}) gewinnt!`;
     gameoverSection.classList.remove('hidden');
   }
 
@@ -263,7 +364,7 @@ function updateTurnBanner(state) {
     return;
   }
   const isMyTurn = state.turn === myColor;
-  const label = state.turn === 'red' ? 'Rot' : 'Gelb';
+  const label = COLOR_LABELS[state.turn] || '';
   turnBanner.textContent = isMyTurn ? '🎲 Du bist am Zug!' : `Warte auf ${label}...`;
   turnBanner.className = 'w-full text-center py-2 rounded-xl font-bold text-lg border transition-colors ' +
     (isMyTurn
@@ -282,7 +383,7 @@ btnDice.addEventListener('click', () => {
 });
 
 // ===============================================================================
-// SOLO MODE - local game engine + simple AI opponent (mirrors server rules)
+// Shared movement math (distance model: -1 base, 0-50 ring, 51-56 home stretch)
 // ===============================================================================
 function computeValidMoves(tokens, diceValue) {
   const moves = [];
@@ -297,18 +398,22 @@ function computeValidMoves(tokens, diceValue) {
   return moves;
 }
 
+// Steps one cell at a time, checking every intermediate cell for captures
+// ("Boom-Effekt") instead of jumping straight to the landing square.
 function applyMove(state, color, tokenIndex, diceValue) {
   const tokens = state.tokens[color];
   const d = tokens[tokenIndex];
   const newD = d === -1 ? 0 : d + diceValue;
-  tokens[tokenIndex] = newD;
+  const firstStep = d === -1 ? 0 : d + 1;
+
+  const opp = opponentColorOf(state, color);
+  const oppTokens = opp ? state.tokens[opp] : null;
 
   let captured = false;
-  if (newD >= 0 && newD <= 50) {
-    const abs = (START_OFFSET[color] + newD) % RING_LENGTH;
-    if (!SAFE_CELLS.has(abs)) {
-      const opp = otherColor(color);
-      const oppTokens = state.tokens[opp];
+  if (oppTokens) {
+    for (let step = firstStep; step <= newD && step <= 50; step++) {
+      const abs = (START_OFFSET[color] + step) % RING_LENGTH;
+      if (SAFE_CELLS.has(abs)) continue;
       for (let i = 0; i < oppTokens.length; i++) {
         if (oppTokens[i] >= 0 && oppTokens[i] <= 50) {
           const oppAbs = (START_OFFSET[opp] + oppTokens[i]) % RING_LENGTH;
@@ -321,6 +426,7 @@ function applyMove(state, color, tokenIndex, diceValue) {
     }
   }
 
+  tokens[tokenIndex] = newD;
   return { captured, finished: newD === 56 };
 }
 
@@ -328,20 +434,56 @@ function checkWin(state, color) {
   return state.tokens[color].every((d) => d === 56);
 }
 
-function startSoloGame() {
+// Builds the list of board cells a token passes through for one move, so the
+// UI can animate it step-by-step instead of teleporting to the target cell.
+function computeStepPath(color, fromD, diceValue) {
+  if (fromD === -1) return [tokenCell(color, 0)];
+  const path = [];
+  for (let d = fromD + 1; d <= fromD + diceValue; d++) {
+    path.push(tokenCell(color, Math.min(d, 56)));
+  }
+  return path;
+}
+
+function animateTokenMove(color, tokenIndex, path, bgState, onComplete) {
+  let i = 0;
+  const stepMs = 180;
+  function tick() {
+    animatingTokenInfo = { color, idx: tokenIndex, cell: path[i] };
+    drawBoard(bgState);
+    i++;
+    if (i < path.length) {
+      setTimeout(tick, stepMs);
+    } else {
+      animatingTokenInfo = null;
+      onComplete();
+    }
+  }
+  tick();
+}
+
+// ===============================================================================
+// SOLO MODE - local game engine + simple AI opponent (mirrors server rules)
+// ===============================================================================
+function startSoloGame(chosenColor) {
   gameMode = 'solo';
-  myColor = 'red';
+  myColor = chosenColor;
+  const remaining = ALL_COLORS.filter((c) => c !== chosenColor);
+  const botColor = remaining[Math.floor(Math.random() * remaining.length)];
+  const tokens = {};
+  ALL_COLORS.forEach((c) => { tokens[c] = [-1, -1, -1, -1]; });
+
   localState = {
     code: 'SOLO',
     players: [
-      { name: getPlayerName() || 'Du', color: 'red' },
-      { name: 'Boom-Bot', color: 'yellow' },
+      { name: getPlayerName() || 'Du', color: chosenColor },
+      { name: 'Boom-Bot', color: botColor },
     ],
-    turn: 'red',
+    turn: chosenColor,
     dice: null,
     validMoves: [],
     sixStreak: 0,
-    tokens: { red: [-1, -1, -1, -1], yellow: [-1, -1, -1, -1] },
+    tokens,
     started: true,
     winner: null,
   };
@@ -351,11 +493,15 @@ function startSoloGame() {
   applyState(localState);
 }
 
+function botColorOf() {
+  return localState.players[1].color;
+}
+
 function localPassTurn() {
   localState.dice = null;
   localState.validMoves = [];
   localState.sixStreak = 0;
-  localState.turn = otherColor(localState.turn);
+  localState.turn = opponentColorOf(localState, localState.turn);
 }
 
 function localExtraTurn() {
@@ -365,7 +511,7 @@ function localExtraTurn() {
 
 function playerLabel(color) {
   const p = localState.players.find((pl) => pl.color === color);
-  return p ? p.name : (color === 'red' ? 'Rot' : 'Gelb');
+  return p ? p.name : COLOR_LABELS[color];
 }
 
 function localRollDice() {
@@ -377,10 +523,11 @@ function localRollDice() {
     localState.sixStreak = value === 6 ? localState.sixStreak + 1 : 0;
 
     if (localState.sixStreak === 3) {
+      const forfeitedName = playerLabel(localState.turn);
       localState.dice = value;
       localPassTurn();
       applyState(localState);
-      showToast(`3x Sechs hintereinander – Zug von ${playerLabel(otherColor(localState.turn))} verfällt!`);
+      showToast(`3x Sechs hintereinander – Zug von ${forfeitedName} verfällt!`);
       maybeScheduleAiTurn();
       return;
     }
@@ -400,7 +547,7 @@ function localRollDice() {
     }
 
     applyState(localState);
-    if (color === 'yellow') {
+    if (color === botColorOf()) {
       setTimeout(() => aiMakeMove(), 700 + Math.random() * 600);
     }
   });
@@ -412,8 +559,18 @@ function localMoveToken(tokenIndex) {
   if (localState.dice === null || !localState.validMoves.includes(tokenIndex)) return;
 
   const diceValue = localState.dice;
-  const { captured, finished } = applyMove(localState, color, tokenIndex, diceValue);
+  const fromD = localState.tokens[color][tokenIndex];
+  const path = computeStepPath(color, fromD, diceValue);
 
+  isAnimating = true;
+  animateTokenMove(color, tokenIndex, path, localState, () => {
+    isAnimating = false;
+    const { captured, finished } = applyMove(localState, color, tokenIndex, diceValue);
+    finalizeLocalMove(color, diceValue, captured, finished);
+  });
+}
+
+function finalizeLocalMove(color, diceValue, captured, finished) {
   if (checkWin(localState, color)) {
     localState.winner = color;
     localState.dice = null;
@@ -424,7 +581,7 @@ function localMoveToken(tokenIndex) {
   }
 
   let message = null;
-  if (captured) message = `${playerLabel(color)} hat einen Spielstein geschlagen!`;
+  if (captured) message = `${playerLabel(color)} hat einen Spielstein geschlagen! 💥`;
   else if (finished) message = `${playerLabel(color)} hat einen Stein ins Ziel gebracht!`;
 
   if (diceValue === 6) {
@@ -440,17 +597,15 @@ function localMoveToken(tokenIndex) {
 
 function maybeScheduleAiTurn() {
   if (gameMode !== 'solo' || !localState || localState.winner) return;
-  if (localState.turn !== 'yellow' || localState.dice !== null) return;
+  if (localState.turn !== botColorOf() || localState.dice !== null) return;
   setTimeout(() => {
-    if (gameMode === 'solo' && localState && !localState.winner && localState.turn === 'yellow' && localState.dice === null) {
+    if (gameMode === 'solo' && localState && !localState.winner && localState.turn === botColorOf() && localState.dice === null) {
       localRollDice();
     }
   }, 1000 + Math.random() * 1000);
 }
 
-function aiPickMove(validMoves, tokens, oppTokens, diceValue, color) {
-  const opp = otherColor(color);
-
+function aiPickMove(validMoves, tokens, oppTokens, diceValue, color, opp) {
   function wouldCapture(tokenIndex) {
     const d = tokens[tokenIndex];
     const newD = d === -1 ? 0 : d + diceValue;
@@ -474,8 +629,10 @@ function aiPickMove(validMoves, tokens, oppTokens, diceValue, color) {
 
 function aiMakeMove() {
   if (gameMode !== 'solo' || !localState || localState.winner) return;
-  if (localState.turn !== 'yellow' || localState.dice === null) return;
-  const idx = aiPickMove(localState.validMoves, localState.tokens.yellow, localState.tokens.red, localState.dice, 'yellow');
+  const color = botColorOf();
+  if (localState.turn !== color || localState.dice === null) return;
+  const opp = opponentColorOf(localState, color);
+  const idx = aiPickMove(localState.validMoves, localState.tokens[color], localState.tokens[opp], localState.dice, color, opp);
   localMoveToken(idx);
 }
 
@@ -493,6 +650,8 @@ function drawCell(row, col, fill, opts = {}) {
   ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
 }
 
+const LIGHT_TINT = { red: '#fca5a5', blue: '#93c5fd', yellow: '#fde047', green: '#86efac' };
+
 function drawBoard(state) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -500,20 +659,17 @@ function drawBoard(state) {
   ctx.fillStyle = '#1e1b4b';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Corner yards (6x6) - red top-left, yellow bottom-right active; others decorative
-  drawYard(0, 0, '#7f1d1d', '#fecaca');       // red yard
-  drawYard(0, 9, '#334155', '#94a3b8');       // unused (top-right)
-  drawYard(9, 9, '#78350f', '#fde68a');       // yellow yard
-  drawYard(9, 0, '#334155', '#94a3b8');       // unused (bottom-left)
+  // Corner yards (6x6), one per color
+  drawYard(0, 0, COLOR_DARK.red, LIGHT_TINT.red);       // red yard (top-left)
+  drawYard(0, 9, COLOR_DARK.green, LIGHT_TINT.green);   // green yard (top-right)
+  drawYard(9, 9, COLOR_DARK.yellow, LIGHT_TINT.yellow); // yellow yard (bottom-right)
+  drawYard(9, 0, COLOR_DARK.blue, LIGHT_TINT.blue);     // blue yard (bottom-left)
 
   // Ring path cells
   RING_PATH.forEach(([r, c], idx) => {
     const isSafe = SAFE_CELLS.has(idx);
-    const isRedStart = idx === START_OFFSET.red;
-    const isYellowStart = idx === START_OFFSET.yellow;
-    let fill = '#f8fafc';
-    if (isRedStart) fill = '#fca5a5';
-    if (isYellowStart) fill = '#fde047';
+    const startColor = ALL_COLORS.find((color) => START_OFFSET[color] === idx);
+    const fill = startColor ? LIGHT_TINT[startColor] : '#f8fafc';
     drawCell(r, c, fill);
     if (isSafe) {
       const { x, y, w, h } = cellRect(r, c);
@@ -526,8 +682,9 @@ function drawBoard(state) {
   });
 
   // Home stretch cells
-  HOME_PATHS.red.forEach(([r, c]) => drawCell(r, c, '#fca5a5', { border: 'rgba(127,29,29,0.4)' }));
-  HOME_PATHS.yellow.forEach(([r, c]) => drawCell(r, c, '#fde047', { border: 'rgba(120,53,15,0.4)' }));
+  ALL_COLORS.forEach((color) => {
+    HOME_PATHS[color].forEach(([r, c]) => drawCell(r, c, LIGHT_TINT[color], { border: 'rgba(0,0,0,0.35)' }));
+  });
 
   // Center home triangle
   drawCenter();
@@ -548,8 +705,6 @@ function drawBoard(state) {
 
   if (state) drawTokens(state);
 }
-
-function COLORS() { return ['red', 'yellow']; }
 
 function drawYard(rowStart, colStart, bg, accent) {
   const { x, y } = cellRect(rowStart, colStart);
@@ -585,7 +740,9 @@ function drawCenter() {
   ctx.closePath();
   const grad = ctx.createLinearGradient(cx - half, cy - half, cx + half, cy + half);
   grad.addColorStop(0, COLOR_HEX.red);
-  grad.addColorStop(1, COLOR_HEX.yellow);
+  grad.addColorStop(0.33, COLOR_HEX.green);
+  grad.addColorStop(0.66, COLOR_HEX.yellow);
+  grad.addColorStop(1, COLOR_HEX.blue);
   ctx.fillStyle = grad;
   ctx.fill();
   ctx.strokeStyle = 'white';
@@ -602,7 +759,7 @@ function drawCenter() {
 function tokenCell(color, dist) {
   if (dist === -1) return null; // handled separately via base slot
   if (dist <= 50) {
-    const ringIdx = (START_OFFSET[color] + dist) % 52;
+    const ringIdx = (START_OFFSET[color] + dist) % RING_LENGTH;
     return RING_PATH[ringIdx];
   }
   const homeIdx = Math.min(dist - 51, 5);
@@ -616,7 +773,9 @@ function drawTokens(state) {
   COLORS().forEach((color) => {
     (state.tokens[color] || []).forEach((dist, idx) => {
       let row, col;
-      if (dist === -1) {
+      if (animatingTokenInfo && animatingTokenInfo.color === color && animatingTokenInfo.idx === idx) {
+        [row, col] = animatingTokenInfo.cell;
+      } else if (dist === -1) {
         [row, col] = BASE_SPOTS[color][idx];
       } else {
         [row, col] = tokenCell(color, dist);
@@ -628,7 +787,7 @@ function drawTokens(state) {
   });
 
   const isMyTurn = state.turn === myColor;
-  const canMove = isMyTurn && state.dice !== null && state.validMoves.length > 0;
+  const canMove = isMyTurn && state.dice !== null && state.validMoves.length > 0 && !isAnimating;
 
   groups.forEach((tokens, key) => {
     const [row, col] = key.split('-').map(Number);
@@ -663,7 +822,7 @@ function drawTokens(state) {
       ctx.fillStyle = COLOR_HEX[t.color];
       ctx.fill();
       ctx.lineWidth = 2;
-      ctx.strokeStyle = t.color === 'red' ? '#7f1d1d' : '#854d0e';
+      ctx.strokeStyle = COLOR_DARK[t.color];
       ctx.stroke();
 
       ctx.beginPath();
@@ -702,6 +861,7 @@ function buildHitboxes(groups) {
 }
 
 canvas.addEventListener('click', (evt) => {
+  if (isAnimating) return;
   if (!currentState || currentState.winner) return;
   if (currentState.turn !== myColor || currentState.dice === null) return;
 
@@ -726,8 +886,12 @@ canvas.addEventListener('click', (evt) => {
   if (!best) return;
 
   if (gameMode === 'solo') {
+    // localMoveToken() animates the step-by-step movement itself.
     localMoveToken(best.idx);
   } else {
+    // The server broadcasts the authoritative move; the resulting 'state'
+    // event (with moveInfo) drives the step-by-step animation for everyone,
+    // including the player who clicked.
     socket.emit('moveToken', { tokenIndex: best.idx });
   }
 });

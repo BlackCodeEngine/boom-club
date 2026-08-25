@@ -13,16 +13,19 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Board constants (shared 52-cell ring + 6-cell home stretch per color)
 // ---------------------------------------------------------------------------
 const RING_LENGTH = 52;
-const START_OFFSET = { red: 0, yellow: 26 };
+const COLORS_ALL = ['red', 'blue', 'yellow', 'green'];
+const START_OFFSET = { red: 0, green: 13, yellow: 26, blue: 39 };
 const SAFE_CELLS = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
-const COLORS = ['red', 'yellow'];
-
-function otherColor(color) {
-  return color === 'red' ? 'yellow' : 'red';
-}
 
 function createInitialTokens() {
-  return { red: [-1, -1, -1, -1], yellow: [-1, -1, -1, -1] };
+  const tokens = {};
+  COLORS_ALL.forEach((c) => { tokens[c] = [-1, -1, -1, -1]; });
+  return tokens;
+}
+
+function opponentColorOf(room, color) {
+  const other = room.players.find((p) => p.color !== color);
+  return other ? other.color : null;
 }
 
 function computeValidMoves(tokens, diceValue) {
@@ -38,18 +41,22 @@ function computeValidMoves(tokens, diceValue) {
   return moves;
 }
 
+// Moves the token one step at a time through every intermediate cell so that
+// captures on the way ("Boom-Effekt") are detected, not just on the final cell.
 function applyMove(room, color, tokenIndex, diceValue) {
   const tokens = room.tokens[color];
   const d = tokens[tokenIndex];
   const newD = d === -1 ? 0 : d + diceValue;
-  tokens[tokenIndex] = newD;
+  const firstStep = d === -1 ? 0 : d + 1;
+
+  const opp = opponentColorOf(room, color);
+  const oppTokens = opp ? room.tokens[opp] : null;
 
   let captured = false;
-  if (newD >= 0 && newD <= 50) {
-    const abs = (START_OFFSET[color] + newD) % RING_LENGTH;
-    if (!SAFE_CELLS.has(abs)) {
-      const opp = otherColor(color);
-      const oppTokens = room.tokens[opp];
+  if (oppTokens) {
+    for (let step = firstStep; step <= newD && step <= 50; step++) {
+      const abs = (START_OFFSET[color] + step) % RING_LENGTH;
+      if (SAFE_CELLS.has(abs)) continue;
       for (let i = 0; i < oppTokens.length; i++) {
         if (oppTokens[i] >= 0 && oppTokens[i] <= 50) {
           const oppAbs = (START_OFFSET[opp] + oppTokens[i]) % RING_LENGTH;
@@ -62,8 +69,8 @@ function applyMove(room, color, tokenIndex, diceValue) {
     }
   }
 
-  const finished = newD === 56;
-  return { captured, finished };
+  tokens[tokenIndex] = newD;
+  return { captured, finished: newD === 56 };
 }
 
 function checkWin(room, color) {
@@ -121,7 +128,7 @@ io.on('connection', (socket) => {
     const code = generateRoomCode();
     const room = {
       code,
-      players: [{ id: socket.id, name: (name || 'Spieler 1').slice(0, 16), color: 'red', connected: true }],
+      players: [{ id: socket.id, name: (name || 'Spieler 1').slice(0, 16), color: null, connected: true }],
       turnIndex: 0,
       dice: null,
       validMoves: [],
@@ -133,8 +140,7 @@ io.on('connection', (socket) => {
     rooms.set(code, room);
     socket.join(code);
     socket.data.roomCode = code;
-    socket.data.color = 'red';
-    socket.emit('roomCreated', { code, color: 'red', state: publicState(room) });
+    socket.emit('roomCreated', { code, state: publicState(room) });
   });
 
   socket.on('joinRoom', ({ code, name }) => {
@@ -147,13 +153,37 @@ io.on('connection', (socket) => {
       socket.emit('errorMsg', 'Raum ist bereits voll.');
       return;
     }
-    room.players.push({ id: socket.id, name: (name || 'Spieler 2').slice(0, 16), color: 'yellow', connected: true });
-    room.started = true;
+    room.players.push({ id: socket.id, name: (name || 'Spieler 2').slice(0, 16), color: null, connected: true });
     socket.join(room.code);
     socket.data.roomCode = room.code;
-    socket.data.color = 'yellow';
-    socket.emit('roomJoined', { code: room.code, color: 'yellow', state: publicState(room) });
-    io.to(room.code).emit('gameStart', publicState(room));
+    socket.emit('roomJoined', { state: publicState(room) });
+    broadcastState(room);
+  });
+
+  socket.on('selectColor', ({ color }) => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || room.started) return;
+    if (!COLORS_ALL.includes(color)) return;
+
+    const player = room.players.find((p) => p.id === socket.id);
+    if (!player) return;
+
+    const takenByOther = room.players.some((p) => p.id !== socket.id && p.color === color);
+    if (takenByOther) {
+      socket.emit('errorMsg', 'Diese Farbe ist bereits vergeben.');
+      return;
+    }
+
+    player.color = color;
+
+    const bothChosen = room.players.length === 2 && room.players.every((p) => p.color);
+    if (bothChosen) {
+      room.started = true;
+      room.turnIndex = 0;
+    }
+
+    socket.emit('colorConfirmed', { color, state: publicState(room) });
+    broadcastState(room);
   });
 
   socket.on('rollDice', () => {
@@ -195,16 +225,18 @@ io.on('connection', (socket) => {
     if (room.dice === null || !room.validMoves.includes(tokenIndex)) return;
 
     const diceValue = room.dice;
-    const { captured, finished } = applyMove(room, currentPlayer.color, tokenIndex, diceValue);
+    const color = currentPlayer.color;
+    const moveInfo = { color, tokenIndex, diceValue };
+    const { captured, finished } = applyMove(room, color, tokenIndex, diceValue);
 
-    if (checkWin(room, currentPlayer.color)) {
-      room.winner = currentPlayer.color;
-      broadcastState(room, { message: `${currentPlayer.name} hat gewonnen!` });
+    if (checkWin(room, color)) {
+      room.winner = color;
+      broadcastState(room, { message: `${currentPlayer.name} hat gewonnen!`, moveInfo });
       return;
     }
 
     let message = null;
-    if (captured) message = `${currentPlayer.name} hat einen Spielstein geschlagen!`;
+    if (captured) message = `${currentPlayer.name} hat einen Spielstein geschlagen! 💥`;
     else if (finished) message = `${currentPlayer.name} hat einen Stein ins Ziel gebracht!`;
 
     if (diceValue === 6) {
@@ -212,7 +244,7 @@ io.on('connection', (socket) => {
     } else {
       passTurn(room);
     }
-    broadcastState(room, { message });
+    broadcastState(room, { message, moveInfo });
   });
 
   socket.on('disconnect', () => {
@@ -223,7 +255,7 @@ io.on('connection', (socket) => {
     const player = room.players.find((p) => p.id === socket.id);
     if (player) player.connected = false;
 
-    if (room.started && !room.winner) {
+    if (!room.winner) {
       io.to(room.code).emit('opponentLeft', { name: player ? player.name : 'Der Gegner' });
     }
     rooms.delete(code);

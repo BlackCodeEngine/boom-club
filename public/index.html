@@ -26,6 +26,32 @@
   }
   .menu-btn:active:not(:disabled) { transform: scale(0.97); }
   .menu-btn:disabled { cursor: not-allowed; }
+
+  .color-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1.5rem 1rem;
+    border-radius: 1rem;
+    background: rgba(255,255,255,0.08);
+    border: 2px solid var(--card-color, rgba(255,255,255,0.25));
+    color: white;
+    font-weight: 700;
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .color-card:active:not(:disabled) { transform: scale(0.95); }
+  .color-card:not(:disabled):hover { background: rgba(255,255,255,0.16); }
+  .color-card:disabled { opacity: 0.35; filter: grayscale(0.7); cursor: not-allowed; }
+  .color-swatch {
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 9999px;
+    background: var(--card-color);
+    box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+  }
+  .taken-label { font-size: 0.65rem; font-weight: 500; opacity: 0.8; }
 </style>
 </head>
 <body class="bg-gradient-to-b from-indigo-900 via-purple-900 to-fuchsia-900 min-h-screen text-white font-sans">
@@ -36,7 +62,7 @@
     <section id="main-menu" class="w-full max-w-md">
       <div class="text-center mb-8">
         <h1 class="text-5xl font-extrabold tracking-tight drop-shadow-lg">💥 Boom Club</h1>
-        <p class="text-indigo-200 mt-2">Rot vs. Gelb – der ultimative Würfel-Duell</p>
+        <p class="text-indigo-200 mt-2">Rot · Blau · Gelb · Grün – das ultimative Würfel-Duell</p>
       </div>
 
       <div class="space-y-4">
@@ -114,6 +140,19 @@
       </div>
     </section>
 
+    <!-- COLOR SELECT -->
+    <section id="color-select" class="hidden w-full max-w-md">
+      <button id="btn-colorselect-back" class="mb-4 text-indigo-200 text-sm hover:text-white transition">← Zurück zum Menü</button>
+
+      <div class="text-center mb-6">
+        <h2 class="text-3xl font-extrabold">🎨 Wähle deine Farbe</h2>
+        <p id="color-select-subtitle" class="text-indigo-200 text-sm mt-1"></p>
+      </div>
+
+      <div id="color-cards" class="grid grid-cols-2 gap-4"></div>
+      <p id="color-select-error" class="text-rose-300 text-sm text-center min-h-[1.25rem] mt-4"></p>
+    </section>
+
     <!-- WAITING ROOM -->
     <section id="waiting" class="hidden w-full max-w-md text-center">
       <div class="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl p-8 border border-white/20">
@@ -144,15 +183,15 @@
 
       <div class="w-full flex items-center justify-between bg-white/10 backdrop-blur rounded-xl px-4 py-2 border border-white/20">
         <div class="flex items-center gap-2">
-          <span class="w-3 h-3 rounded-full bg-red-500 inline-block"></span>
-          <span id="name-red" class="font-semibold text-sm truncate max-w-[6rem]">Rot</span>
+          <span id="dot-player1" class="w-3 h-3 rounded-full inline-block"></span>
+          <span id="name-player1" class="font-semibold text-sm truncate max-w-[6rem]">Spieler 1</span>
         </div>
         <div class="text-xs text-indigo-200">
           <span id="game-room-label">Raum:</span> <span id="game-room-code" class="font-mono font-bold text-white"></span>
         </div>
         <div class="flex items-center gap-2">
-          <span id="name-yellow" class="font-semibold text-sm truncate max-w-[6rem]">Gelb</span>
-          <span class="w-3 h-3 rounded-full bg-yellow-400 inline-block"></span>
+          <span id="name-player2" class="font-semibold text-sm truncate max-w-[6rem]">Spieler 2</span>
+          <span id="dot-player2" class="w-3 h-3 rounded-full inline-block"></span>
         </div>
       </div>
 
