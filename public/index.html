@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Boom Club</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body { overscroll-behavior: none; }
+  #board-canvas { touch-action: manipulation; }
+  @keyframes pop { 0% { transform: scale(0.8); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+  .pop-in { animation: pop 0.2s ease-out; }
+  @keyframes shake { 0%, 100% { transform: rotate(0deg); } 25% { transform: rotate(-8deg); } 75% { transform: rotate(8deg); } }
+  .dice-rolling { animation: shake 0.4s ease-in-out infinite; }
+
+  .menu-btn {
+    width: 100%;
+    text-align: left;
+    padding: 1rem 1.25rem;
+    border-radius: 1rem;
+    font-weight: 800;
+    font-size: 1.125rem;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+    transition: transform 0.15s ease;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .menu-btn:active:not(:disabled) { transform: scale(0.97); }
+  .menu-btn:disabled { cursor: not-allowed; }
+</style>
+</head>
+<body class="bg-gradient-to-b from-indigo-900 via-purple-900 to-fuchsia-900 min-h-screen text-white font-sans">
+
+  <div id="app" class="min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- MAIN MENU -->
+    <section id="main-menu" class="w-full max-w-md">
+      <div class="text-center mb-8">
+        <h1 class="text-5xl font-extrabold tracking-tight drop-shadow-lg">💥 Boom Club</h1>
+        <p class="text-indigo-200 mt-2">Rot vs. Gelb – der ultimative Würfel-Duell</p>
+      </div>
+
+      <div class="space-y-4">
+        <button id="btn-nav-solo" class="menu-btn bg-gradient-to-r from-rose-500 to-orange-400 text-white">
+          🎮 Solo
+          <span class="block text-xs font-normal opacity-80 mt-0.5">Gegen die KI spielen</span>
+        </button>
+
+        <button id="btn-nav-online" class="menu-btn bg-gradient-to-r from-emerald-500 to-teal-400 text-white">
+          🌐 Online Multiplayer
+          <span class="block text-xs font-normal opacity-80 mt-0.5">Raum erstellen oder beitreten</span>
+        </button>
+
+        <button id="btn-nav-shop" disabled class="menu-btn bg-white/10 text-white/50">
+          🛒 Shop
+          <span class="block text-xs font-normal opacity-70 mt-0.5">Bald verfügbar</span>
+        </button>
+
+        <button id="btn-nav-settings" class="menu-btn bg-white/10 hover:bg-white/20 text-white">
+          ⚙️ Einstellungen
+        </button>
+      </div>
+    </section>
+
+    <!-- ONLINE MENU (create / join room) -->
+    <section id="online-menu" class="hidden w-full max-w-md">
+      <button id="btn-online-back" class="mb-4 text-indigo-200 text-sm hover:text-white transition">← Zurück zum Menü</button>
+
+      <div class="text-center mb-6">
+        <h2 class="text-3xl font-extrabold">🌐 Online Multiplayer</h2>
+      </div>
+
+      <div class="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl p-6 space-y-6 border border-white/20">
+        <button id="btn-create"
+          class="w-full py-3 rounded-xl bg-gradient-to-r from-rose-500 to-orange-400 font-bold text-lg shadow-lg active:scale-95 transition">
+          🎲 Neuen Raum erstellen
+        </button>
+
+        <div class="flex items-center gap-3">
+          <div class="h-px flex-1 bg-white/20"></div>
+          <span class="text-xs text-indigo-300">ODER</span>
+          <div class="h-px flex-1 bg-white/20"></div>
+        </div>
+
+        <div class="space-y-2">
+          <label class="block text-sm font-medium text-indigo-200 mb-1">Raum-Code beitreten</label>
+          <div class="flex gap-2">
+            <input id="room-code-input" type="text" maxlength="5" placeholder="Z. B. 7K2QX"
+              class="flex-1 uppercase tracking-widest text-center rounded-xl px-4 py-3 bg-white/90 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400" />
+            <button id="btn-join"
+              class="px-5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 font-bold shadow-lg active:scale-95 transition">
+              Beitreten
+            </button>
+          </div>
+        </div>
+
+        <p id="landing-error" class="text-rose-300 text-sm text-center min-h-[1.25rem]"></p>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="settings" class="hidden w-full max-w-md">
+      <button id="btn-settings-back" class="mb-4 text-indigo-200 text-sm hover:text-white transition">← Zurück zum Menü</button>
+
+      <div class="text-center mb-6">
+        <h2 class="text-3xl font-extrabold">⚙️ Einstellungen</h2>
+      </div>
+
+      <div class="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl p-6 space-y-4 border border-white/20">
+        <div>
+          <label class="block text-sm font-medium text-indigo-200 mb-1">Dein Name</label>
+          <input id="settings-name-input" type="text" maxlength="16" placeholder="Spielername"
+            class="w-full rounded-xl px-4 py-3 bg-white/90 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-fuchsia-400" />
+        </div>
+      </div>
+    </section>
+
+    <!-- WAITING ROOM -->
+    <section id="waiting" class="hidden w-full max-w-md text-center">
+      <div class="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl p-8 border border-white/20">
+        <p class="text-indigo-200 mb-2">Warte auf einen zweiten Spieler...</p>
+        <p class="text-sm text-indigo-300 mb-4">Teile diesen Code:</p>
+        <div id="waiting-code" class="text-5xl font-black tracking-[0.3em] bg-black/30 rounded-xl py-4 mb-4 select-all"></div>
+        <button id="btn-copy-code" class="px-4 py-2 rounded-lg bg-white/20 hover:bg-white/30 text-sm font-semibold transition">
+          📋 Code kopieren
+        </button>
+        <div class="mt-6 flex justify-center">
+          <div class="w-8 h-8 border-4 border-fuchsia-400 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+        <button id="btn-waiting-cancel" class="mt-6 text-sm text-indigo-300 hover:text-white transition">
+          Abbrechen &amp; zurück zum Menü
+        </button>
+      </div>
+    </section>
+
+    <!-- GAME SCREEN -->
+    <section id="game" class="hidden w-full max-w-lg flex flex-col items-center gap-4">
+
+      <div class="w-full flex items-center justify-between">
+        <button id="btn-back-to-menu" class="text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition font-semibold">
+          🏠 Menü
+        </button>
+        <div id="game-mode-label" class="text-xs text-indigo-300"></div>
+      </div>
+
+      <div class="w-full flex items-center justify-between bg-white/10 backdrop-blur rounded-xl px-4 py-2 border border-white/20">
+        <div class="flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full bg-red-500 inline-block"></span>
+          <span id="name-red" class="font-semibold text-sm truncate max-w-[6rem]">Rot</span>
+        </div>
+        <div class="text-xs text-indigo-200">
+          <span id="game-room-label">Raum:</span> <span id="game-room-code" class="font-mono font-bold text-white"></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="name-yellow" class="font-semibold text-sm truncate max-w-[6rem]">Gelb</span>
+          <span class="w-3 h-3 rounded-full bg-yellow-400 inline-block"></span>
+        </div>
+      </div>
+
+      <div id="turn-banner" class="w-full text-center py-2 rounded-xl font-bold text-lg bg-white/10 border border-white/20 transition-colors">
+        Warte...
+      </div>
+
+      <div class="relative bg-white/5 rounded-2xl p-2 border border-white/20 shadow-2xl">
+        <canvas id="board-canvas" width="600" height="600" class="rounded-xl max-w-[85vw] max-h-[70vh] touch-manipulation"></canvas>
+      </div>
+
+      <div class="flex items-center gap-6">
+        <button id="btn-dice" class="flex flex-col items-center gap-1 group" disabled>
+          <div id="dice-face" class="w-20 h-20 rounded-2xl bg-white text-gray-900 flex items-center justify-center text-4xl font-black shadow-xl border-4 border-white/50 group-active:scale-90 transition group-disabled:opacity-40">
+            🎲
+          </div>
+          <span class="text-xs text-indigo-200">Würfeln</span>
+        </button>
+      </div>
+
+      <div id="message-toast" class="min-h-[1.5rem] text-sm text-center text-fuchsia-200 font-medium"></div>
+    </section>
+
+    <!-- GAME OVER OVERLAY -->
+    <section id="gameover" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
+      <div class="bg-gradient-to-br from-indigo-800 to-fuchsia-800 rounded-2xl p-8 text-center shadow-2xl border border-white/20 max-w-sm w-full mx-4 pop-in">
+        <div class="text-6xl mb-4">🏆</div>
+        <h2 id="gameover-text" class="text-2xl font-extrabold mb-6">Spiel vorbei!</h2>
+        <button id="btn-restart" class="px-6 py-3 rounded-xl bg-white text-indigo-900 font-bold shadow-lg active:scale-95 transition">
+          Zurück zum Start
+        </button>
+      </div>
+    </section>
+
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
