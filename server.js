@@ -1,14 +1,43 @@
+require('dotenv').config();
+
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ---------------------------------------------------------------------------
+// Supabase (Postgres + Auth) - persistent accounts, profiles and coin balances
+// ---------------------------------------------------------------------------
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// No session persistence server-side - every auth call is a one-off request
+// on behalf of whichever socket happens to be logging in/registering.
+const SUPABASE_CLIENT_OPTS = { auth: { persistSession: false, autoRefreshToken: false } };
+
+let supabase = null; // anon key - regular signUp/signInWithPassword calls
+let supabaseAdmin = null; // service_role key - bypasses RLS, manages profiles
+
+if (SUPABASE_URL && SUPABASE_ANON_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_CLIENT_OPTS);
+} else {
+  console.warn('[Supabase] SUPABASE_URL/SUPABASE_ANON_KEY fehlen - authRegister/authLogin sind deaktiviert.');
+}
+
+if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+  supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_CLIENT_OPTS);
+} else {
+  console.warn('[Supabase] SUPABASE_SERVICE_ROLE_KEY fehlt - Profile (Username/Coins) werden nicht serverseitig verwaltet.');
+}
 
 // ---------------------------------------------------------------------------
 // Board constants (shared 52-cell ring + 6-cell home stretch per color)
@@ -155,6 +184,83 @@ function broadcastState(room, extra) {
 }
 
 io.on('connection', (socket) => {
+  // --- Supabase Auth (email + password) ---------------------------------------
+  socket.on('authRegister', async ({ email, password, username }) => {
+    if (!supabase) {
+      socket.emit('authError', 'Supabase ist serverseitig nicht konfiguriert.');
+      return;
+    }
+    if (!email || !password) {
+      socket.emit('authError', 'E-Mail und Passwort werden benötigt.');
+      return;
+    }
+
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) {
+      socket.emit('authError', error.message);
+      return;
+    }
+
+    const user = data.user;
+    if (user && supabaseAdmin) {
+      const { error: profileError } = await supabaseAdmin.from('profiles').insert({
+        id: user.id,
+        username: (username || email.split('@')[0]).slice(0, 24),
+        coins: 10000,
+      });
+      // 23505 = unique_violation (profile already exists) - harmless race, ignore.
+      if (profileError && profileError.code !== '23505') {
+        console.error('[Supabase] Profil konnte nicht angelegt werden:', profileError.message);
+      }
+    }
+
+    socket.emit('authRegistered', {
+      userId: user ? user.id : null,
+      needsEmailConfirmation: !data.session,
+    });
+  });
+
+  socket.on('authLogin', async ({ email, password }) => {
+    if (!supabase) {
+      socket.emit('authError', 'Supabase ist serverseitig nicht konfiguriert.');
+      return;
+    }
+    if (!email || !password) {
+      socket.emit('authError', 'E-Mail und Passwort werden benötigt.');
+      return;
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      socket.emit('authError', error.message);
+      return;
+    }
+
+    const user = data.user;
+    socket.data.userId = user.id;
+
+    let profile = null;
+    if (supabaseAdmin) {
+      const { data: profileData, error: profileError } = await supabaseAdmin
+        .from('profiles')
+        .select('username, coins')
+        .eq('id', user.id)
+        .single();
+      if (profileError) {
+        console.error('[Supabase] Profil konnte nicht geladen werden:', profileError.message);
+      } else {
+        profile = profileData;
+      }
+    }
+
+    socket.emit('authLoggedIn', {
+      userId: user.id,
+      email: user.email,
+      username: profile ? profile.username : null,
+      coins: profile ? profile.coins : null,
+    });
+  });
+
   socket.on('createRoom', ({ name, stake, coins }) => {
     const code = generateRoomCode();
     const playerId = crypto.randomUUID();
@@ -164,6 +270,7 @@ io.on('connection', (socket) => {
       players: [{
         id: socket.id,
         playerId,
+        userId: socket.data.userId || null,
         name: (name || 'Spieler 1').slice(0, 16),
         color: null,
         connected: true,
@@ -200,6 +307,7 @@ io.on('connection', (socket) => {
     room.players.push({
       id: socket.id,
       playerId,
+      userId: socket.data.userId || null,
       name: (name || 'Spieler 2').slice(0, 16),
       color: null,
       connected: true,
