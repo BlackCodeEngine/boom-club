@@ -105,6 +105,7 @@ function renderCoins() {
 
 // --- DOM references ---------------------------------------------------------
 const screens = {
+  account: document.getElementById('account'),
   mainMenu: document.getElementById('main-menu'),
   onlineMenu: document.getElementById('online-menu'),
   settings: document.getElementById('settings'),
@@ -158,6 +159,30 @@ const btnColorSelectBack = document.getElementById('btn-colorselect-back');
 const colorSelectSubtitle = document.getElementById('color-select-subtitle');
 const colorCardsEl = document.getElementById('color-cards');
 const colorSelectError = document.getElementById('color-select-error');
+
+// --- Account screen (register / login / guest) DOM refs ------------------------
+const tabRegisterEl = document.getElementById('tab-register');
+const tabLoginEl = document.getElementById('tab-login');
+const formRegisterEl = document.getElementById('form-register');
+const formLoginEl = document.getElementById('form-login');
+const registerEmailInput = document.getElementById('register-email');
+const registerEmailError = document.getElementById('register-email-error');
+const registerUsernameInput = document.getElementById('register-username');
+const registerUsernameError = document.getElementById('register-username-error');
+const registerUsernameStatus = document.getElementById('register-username-status');
+const registerPasswordInput = document.getElementById('register-password');
+const registerPasswordError = document.getElementById('register-password-error');
+const btnRegisterSubmit = document.getElementById('btn-register-submit');
+const registerGeneralError = document.getElementById('register-general-error');
+const registerSuccessEl = document.getElementById('register-success');
+const loginEmailInput = document.getElementById('login-email');
+const loginEmailError = document.getElementById('login-email-error');
+const loginPasswordInput = document.getElementById('login-password');
+const loginPasswordError = document.getElementById('login-password-error');
+const btnLoginSubmit = document.getElementById('btn-login-submit');
+const loginGeneralError = document.getElementById('login-general-error');
+const loginSuccessEl = document.getElementById('login-success');
+const btnPlayGuest = document.getElementById('btn-play-guest');
 
 const coinsDisplayEl = document.getElementById('coins-display');
 const stakeSelectEl = document.getElementById('stake-select');
@@ -270,6 +295,168 @@ function showToast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { messageToast.textContent = ''; }, 3500);
 }
+
+// ===============================================================================
+// ACCOUNT SCREEN - register / login (Supabase Auth) or play as guest
+// ===============================================================================
+let loggedInUserId = null;
+
+function setAccountTab(tab) {
+  const isRegister = tab === 'register';
+  tabRegisterEl.classList.toggle('active', isRegister);
+  tabLoginEl.classList.toggle('active', !isRegister);
+  formRegisterEl.classList.toggle('hidden', !isRegister);
+  formLoginEl.classList.toggle('hidden', isRegister);
+}
+tabRegisterEl.addEventListener('click', () => setAccountTab('register'));
+tabLoginEl.addEventListener('click', () => setAccountTab('login'));
+
+function clearRegisterErrors() {
+  registerEmailError.textContent = '';
+  registerUsernameError.textContent = '';
+  registerPasswordError.textContent = '';
+  registerGeneralError.textContent = '';
+}
+function clearLoginErrors() {
+  loginEmailError.textContent = '';
+  loginPasswordError.textContent = '';
+  loginGeneralError.textContent = '';
+}
+
+const AUTH_ERROR_MESSAGES = {
+  'User already registered': 'Diese E-Mail-Adresse ist bereits registriert.',
+  'Password should be at least 6 characters': 'Passwort muss mindestens 6 Zeichen haben.',
+  'Invalid login credentials': 'E-Mail oder Passwort ist falsch.',
+  'Email not confirmed': 'Bitte bestätige zuerst deine E-Mail-Adresse.',
+  'Unable to validate email address: invalid format': 'Bitte gib eine gültige E-Mail-Adresse ein.',
+};
+function translateAuthError(msg) {
+  return AUTH_ERROR_MESSAGES[msg] || msg;
+}
+
+// --- Live username availability check (debounced) -------------------------------
+let usernameCheckTimer = null;
+function setUsernameStatus(status) {
+  // status: null | 'checking' | 'available' | 'taken'
+  registerUsernameStatus.textContent =
+    status === 'checking' ? '⏳' : status === 'available' ? '✅' : status === 'taken' ? '❌' : '';
+}
+registerUsernameInput.addEventListener('input', () => {
+  const value = registerUsernameInput.value.trim();
+  registerUsernameError.textContent = '';
+  clearTimeout(usernameCheckTimer);
+
+  if (!value) {
+    setUsernameStatus(null);
+    return;
+  }
+  if (value.length < 3) {
+    setUsernameStatus(null);
+    return;
+  }
+  setUsernameStatus('checking');
+  usernameCheckTimer = setTimeout(() => {
+    ensureConnected();
+    socket.emit('checkUsernameAvailable', { username: value });
+  }, 500);
+});
+
+socket.on('usernameAvailability', ({ username, available }) => {
+  if (registerUsernameInput.value.trim() !== username) return; // stale response
+  if (available === true) {
+    setUsernameStatus('available');
+  } else if (available === false) {
+    setUsernameStatus('taken');
+    registerUsernameError.textContent = 'Dieser Benutzername ist bereits vergeben.';
+  } else {
+    setUsernameStatus(null);
+  }
+});
+
+// --- Register / Login form submission -------------------------------------------
+formRegisterEl.addEventListener('submit', (evt) => {
+  evt.preventDefault();
+  clearRegisterErrors();
+  registerSuccessEl.classList.add('hidden');
+
+  const email = registerEmailInput.value.trim();
+  const username = registerUsernameInput.value.trim();
+  const password = registerPasswordInput.value;
+
+  let hasError = false;
+  if (!email) { registerEmailError.textContent = 'E-Mail wird benötigt.'; hasError = true; }
+  if (!username || username.length < 3) { registerUsernameError.textContent = 'Mindestens 3 Zeichen.'; hasError = true; }
+  if (!password || password.length < 6) { registerPasswordError.textContent = 'Mindestens 6 Zeichen.'; hasError = true; }
+  if (hasError) return;
+
+  ensureConnected();
+  btnRegisterSubmit.disabled = true;
+  socket.emit('authRegister', { email, password, username });
+});
+
+formLoginEl.addEventListener('submit', (evt) => {
+  evt.preventDefault();
+  clearLoginErrors();
+  loginSuccessEl.classList.add('hidden');
+
+  const email = loginEmailInput.value.trim();
+  const password = loginPasswordInput.value;
+
+  let hasError = false;
+  if (!email) { loginEmailError.textContent = 'E-Mail wird benötigt.'; hasError = true; }
+  if (!password) { loginPasswordError.textContent = 'Passwort wird benötigt.'; hasError = true; }
+  if (hasError) return;
+
+  ensureConnected();
+  btnLoginSubmit.disabled = true;
+  socket.emit('authLogin', { email, password });
+});
+
+socket.on('authRegistered', ({ username, coins, needsEmailConfirmation }) => {
+  btnRegisterSubmit.disabled = false;
+
+  if (needsEmailConfirmation) {
+    registerSuccessEl.textContent = '🎉 Konto erstellt! Bitte bestätige deine E-Mail-Adresse und logge dich danach ein.';
+    registerSuccessEl.classList.remove('hidden');
+    setTimeout(() => {
+      loginEmailInput.value = registerEmailInput.value;
+      setAccountTab('login');
+    }, 2200);
+    return;
+  }
+
+  if (username) setPlayerName(username);
+  if (typeof coins === 'number') setCoins(coins);
+
+  registerSuccessEl.textContent = `🎉 Willkommen, ${username || 'Spieler'}! Dein Konto wurde erstellt.`;
+  registerSuccessEl.classList.remove('hidden');
+  setTimeout(() => showScreen('mainMenu'), 1200);
+});
+
+socket.on('authLoggedIn', ({ userId, username, coins }) => {
+  btnLoginSubmit.disabled = false;
+  loggedInUserId = userId;
+
+  if (username) setPlayerName(username);
+  if (typeof coins === 'number') setCoins(coins);
+
+  loginSuccessEl.textContent = `🎉 Willkommen zurück${username ? ', ' + username : ''}!`;
+  loginSuccessEl.classList.remove('hidden');
+  setTimeout(() => showScreen('mainMenu'), 1000);
+});
+
+socket.on('authError', (msg) => {
+  btnRegisterSubmit.disabled = false;
+  btnLoginSubmit.disabled = false;
+  const friendly = translateAuthError(msg);
+  if (!formRegisterEl.classList.contains('hidden')) {
+    registerGeneralError.textContent = friendly;
+  } else {
+    loginGeneralError.textContent = friendly;
+  }
+});
+
+btnPlayGuest.addEventListener('click', () => showScreen('mainMenu'));
 
 // --- Main menu navigation -----------------------------------------------------
 settingsNameInput.value = getPlayerName();
@@ -1281,4 +1468,4 @@ canvas.addEventListener('click', (evt) => {
 
 // initial empty draw
 drawBoard(null);
-showScreen('mainMenu');
+showScreen('account');

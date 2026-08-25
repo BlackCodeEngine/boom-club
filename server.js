@@ -185,14 +185,58 @@ function broadcastState(room, extra) {
 
 io.on('connection', (socket) => {
   // --- Supabase Auth (email + password) ---------------------------------------
+  socket.on('checkUsernameAvailable', async ({ username }) => {
+    const trimmed = (username || '').trim();
+    const lookupClient = supabase || supabaseAdmin;
+    if (!lookupClient) {
+      socket.emit('usernameAvailability', { username: trimmed, available: null, error: 'Supabase nicht konfiguriert.' });
+      return;
+    }
+    if (trimmed.length < 3) {
+      socket.emit('usernameAvailability', { username: trimmed, available: false, reason: 'Mindestens 3 Zeichen.' });
+      return;
+    }
+
+    const { data, error } = await lookupClient
+      .from('profiles')
+      .select('id')
+      .eq('username', trimmed)
+      .maybeSingle();
+
+    if (error) {
+      socket.emit('usernameAvailability', { username: trimmed, available: null, error: error.message });
+      return;
+    }
+    socket.emit('usernameAvailability', { username: trimmed, available: !data });
+  });
+
   socket.on('authRegister', async ({ email, password, username }) => {
     if (!supabase) {
       socket.emit('authError', 'Supabase ist serverseitig nicht konfiguriert.');
       return;
     }
-    if (!email || !password) {
-      socket.emit('authError', 'E-Mail und Passwort werden benötigt.');
+    const trimmedUsername = (username || '').trim();
+    if (!email || !password || !trimmedUsername) {
+      socket.emit('authError', 'E-Mail, Benutzername und Passwort werden benötigt.');
       return;
+    }
+    if (trimmedUsername.length < 3) {
+      socket.emit('authError', 'Benutzername muss mindestens 3 Zeichen haben.');
+      return;
+    }
+
+    // Re-check right before creating the account to shrink the race window
+    // between the live availability check and the actual registration.
+    if (supabase) {
+      const { data: existing, error: lookupError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('username', trimmedUsername)
+        .maybeSingle();
+      if (!lookupError && existing) {
+        socket.emit('authError', 'Dieser Benutzername ist bereits vergeben.');
+        return;
+      }
     }
 
     const { data, error } = await supabase.auth.signUp({ email, password });
@@ -205,17 +249,29 @@ io.on('connection', (socket) => {
     if (user && supabaseAdmin) {
       const { error: profileError } = await supabaseAdmin.from('profiles').insert({
         id: user.id,
-        username: (username || email.split('@')[0]).slice(0, 24),
+        username: trimmedUsername.slice(0, 24),
         coins: 10000,
       });
-      // 23505 = unique_violation (profile already exists) - harmless race, ignore.
-      if (profileError && profileError.code !== '23505') {
-        console.error('[Supabase] Profil konnte nicht angelegt werden:', profileError.message);
+      if (profileError) {
+        if (profileError.code === '23505' && /username/i.test(profileError.message)) {
+          socket.emit('authError', 'Dieser Benutzername wurde gerade eben vergeben - bitte einen anderen wählen.');
+          return;
+        }
+        // Otherwise likely the profile-id-already-exists race - harmless, ignore.
+        if (profileError.code !== '23505') {
+          console.error('[Supabase] Profil konnte nicht angelegt werden:', profileError.message);
+        }
       }
+    }
+
+    if (user && data.session) {
+      socket.data.userId = user.id;
     }
 
     socket.emit('authRegistered', {
       userId: user ? user.id : null,
+      username: trimmedUsername,
+      coins: 10000,
       needsEmailConfirmation: !data.session,
     });
   });

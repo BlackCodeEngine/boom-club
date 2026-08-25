@@ -112,6 +112,114 @@
     color: white;
     box-shadow: 0 2px 10px rgba(0,0,0,0.3);
   }
+
+  /* --- Account screen: tropical beach-club lounge, distinct from the rest --- */
+  .beach-card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 1.75rem;
+    padding: 1.75rem 1.5rem 1.5rem;
+    background: linear-gradient(160deg, #fdf6e3 0%, #f7dfa0 45%, #f0c25f 100%);
+    border: 1px solid rgba(120, 72, 21, 0.25);
+    box-shadow: 0 25px 60px rgba(90, 54, 16, 0.45), inset 0 1px 0 rgba(255,255,255,0.6);
+  }
+  .palm-decor {
+    position: absolute;
+    bottom: -0.75rem;
+    width: 6.5rem;
+    height: auto;
+    opacity: 0.55;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .palm-decor.left { left: -1.5rem; }
+  .palm-decor.right { right: -1.5rem; transform: scaleX(-1); }
+
+  .beach-content { position: relative; z-index: 1; }
+
+  .account-tab {
+    padding: 0.55rem 0.5rem;
+    border-radius: 0.85rem;
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: rgba(120, 72, 21, 0.65);
+    transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .account-tab.active {
+    background: #fffdf7;
+    color: #78350f;
+    box-shadow: 0 3px 10px rgba(120,72,21,0.2);
+  }
+
+  .account-input {
+    width: 100%;
+    padding: 0.65rem 0.85rem;
+    border-radius: 0.85rem;
+    border: 1px solid rgba(120,72,21,0.3);
+    background: rgba(255,255,255,0.9);
+    color: #4a3419;
+    font-weight: 500;
+  }
+  .account-input:focus {
+    outline: none;
+    border-color: #a8681f;
+    box-shadow: 0 0 0 3px rgba(168,104,31,0.25);
+  }
+  .account-input::placeholder { color: rgba(74,52,25,0.45); }
+
+  .account-field-error {
+    min-height: 1rem;
+    font-size: 0.7rem;
+    color: #b91c1c;
+    font-weight: 700;
+    margin-top: 0.2rem;
+  }
+  .account-success {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: #166534;
+    text-align: center;
+  }
+
+  .username-status {
+    position: absolute;
+    right: 0.7rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  .account-btn {
+    padding: 0.7rem 1rem;
+    border-radius: 0.9rem;
+    font-weight: 800;
+    color: #fdf6e3;
+    background: linear-gradient(180deg, #ad7a48 0%, #7c4a24 100%);
+    box-shadow: 0 5px 0 #55300f, 0 10px 18px rgba(0,0,0,0.25);
+    border: 1px solid rgba(0,0,0,0.15);
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  .account-btn:active:not(:disabled) {
+    transform: translateY(4px);
+    box-shadow: 0 1px 0 #55300f, 0 4px 8px rgba(0,0,0,0.2);
+  }
+  .account-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .account-btn-secondary {
+    padding: 0.65rem 1rem;
+    border-radius: 0.9rem;
+    font-weight: 700;
+    color: #fdf6e3;
+    background: linear-gradient(180deg, #4d8c62 0%, #2a5c3d 100%);
+    box-shadow: 0 5px 0 #1c3f28, 0 10px 18px rgba(0,0,0,0.2);
+    border: 1px solid rgba(0,0,0,0.15);
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  .account-btn-secondary:active {
+    transform: translateY(4px);
+    box-shadow: 0 1px 0 #1c3f28, 0 4px 8px rgba(0,0,0,0.15);
+  }
 </style>
 </head>
 <body class="bg-gradient-to-b from-indigo-900 via-purple-900 to-fuchsia-900 min-h-screen text-white font-sans">
@@ -127,8 +235,86 @@
       <span class="text-xs text-indigo-200 font-semibold self-end mb-0.5">BC</span>
     </div>
 
+    <!-- ACCOUNT (register / login / guest) - tropical beach-club lounge -->
+    <section id="account" class="hidden w-full max-w-md">
+      <div class="beach-card">
+        <svg class="palm-decor left" viewBox="0 0 100 160" xmlns="http://www.w3.org/2000/svg">
+          <path d="M50 155 C 45 120, 55 90, 52 60" fill="none" stroke="#8b5e34" stroke-width="6" stroke-linecap="round"/>
+          <path d="M52 60 C 30 50, 10 55, 2 40 C 20 42, 38 48, 52 60 Z" fill="#2f6b3a"/>
+          <path d="M52 60 C 35 40, 20 25, 8 22 C 24 18, 42 35, 52 60 Z" fill="#357f41"/>
+          <path d="M52 60 C 48 35, 50 15, 42 2 C 55 8, 58 35, 52 60 Z" fill="#2f6b3a"/>
+          <path d="M52 60 C 60 35, 70 15, 82 8 C 68 20, 58 38, 52 60 Z" fill="#357f41"/>
+          <path d="M52 60 C 70 45, 90 42, 100 30 C 90 50, 72 52, 52 60 Z" fill="#2f6b3a"/>
+          <path d="M52 60 C 65 55, 80 62, 96 58 C 82 68, 66 66, 52 60 Z" fill="#3f8f4d"/>
+        </svg>
+        <svg class="palm-decor right" viewBox="0 0 100 160" xmlns="http://www.w3.org/2000/svg">
+          <path d="M50 155 C 45 120, 55 90, 52 60" fill="none" stroke="#8b5e34" stroke-width="6" stroke-linecap="round"/>
+          <path d="M52 60 C 30 50, 10 55, 2 40 C 20 42, 38 48, 52 60 Z" fill="#2f6b3a"/>
+          <path d="M52 60 C 35 40, 20 25, 8 22 C 24 18, 42 35, 52 60 Z" fill="#357f41"/>
+          <path d="M52 60 C 48 35, 50 15, 42 2 C 55 8, 58 35, 52 60 Z" fill="#2f6b3a"/>
+          <path d="M52 60 C 60 35, 70 15, 82 8 C 68 20, 58 38, 52 60 Z" fill="#357f41"/>
+          <path d="M52 60 C 70 45, 90 42, 100 30 C 90 50, 72 52, 52 60 Z" fill="#2f6b3a"/>
+          <path d="M52 60 C 65 55, 80 62, 96 58 C 82 68, 66 66, 52 60 Z" fill="#3f8f4d"/>
+        </svg>
+
+        <div class="beach-content">
+          <div class="text-center mb-5">
+            <h1 class="text-3xl font-extrabold text-amber-900 drop-shadow-sm">🏖️ Boom Club Lounge</h1>
+            <p class="text-amber-900/70 text-sm mt-1">Melde dich an oder spiel direkt als Gast</p>
+          </div>
+
+          <div class="flex gap-1 bg-amber-900/10 rounded-2xl p-1 mb-5">
+            <button id="tab-register" class="account-tab active flex-1">Registrieren</button>
+            <button id="tab-login" class="account-tab flex-1">Login</button>
+          </div>
+
+          <!-- Register form -->
+          <form id="form-register" class="space-y-3">
+            <div>
+              <input id="register-email" type="email" placeholder="E-Mail" class="account-input" autocomplete="email" />
+              <p id="register-email-error" class="account-field-error"></p>
+            </div>
+            <div>
+              <div class="relative">
+                <input id="register-username" type="text" placeholder="Benutzername" maxlength="24" class="account-input pr-9" autocomplete="username" />
+                <span id="register-username-status" class="username-status"></span>
+              </div>
+              <p id="register-username-error" class="account-field-error"></p>
+            </div>
+            <div>
+              <input id="register-password" type="password" placeholder="Passwort" class="account-input" autocomplete="new-password" />
+              <p id="register-password-error" class="account-field-error"></p>
+            </div>
+            <button type="submit" id="btn-register-submit" class="account-btn w-full">🌺 Konto erstellen</button>
+            <p id="register-general-error" class="account-field-error text-center"></p>
+            <p id="register-success" class="account-success hidden"></p>
+          </form>
+
+          <!-- Login form -->
+          <form id="form-login" class="space-y-3 hidden">
+            <div>
+              <input id="login-email" type="email" placeholder="E-Mail" class="account-input" autocomplete="email" />
+              <p id="login-email-error" class="account-field-error"></p>
+            </div>
+            <div>
+              <input id="login-password" type="password" placeholder="Passwort" class="account-input" autocomplete="current-password" />
+              <p id="login-password-error" class="account-field-error"></p>
+            </div>
+            <button type="submit" id="btn-login-submit" class="account-btn w-full">🌴 Einloggen</button>
+            <p id="login-general-error" class="account-field-error text-center"></p>
+            <p id="login-success" class="account-success hidden"></p>
+          </form>
+
+          <div class="mt-6 pt-5 border-t border-amber-900/20 text-center">
+            <button id="btn-play-guest" class="account-btn-secondary w-full">🏝️ Als Gast spielen</button>
+            <p class="text-[11px] text-amber-900/60 mt-2">Als Gast werden keine Spielfortschritte gespeichert.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- MAIN MENU -->
-    <section id="main-menu" class="w-full max-w-md">
+    <section id="main-menu" class="hidden w-full max-w-md">
       <div class="w-full flex justify-end mb-2">
         <button id="btn-refresh-app" class="text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition font-semibold flex items-center gap-1.5">
           🔄 Aktualisieren
