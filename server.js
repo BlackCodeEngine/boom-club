@@ -18,6 +18,7 @@ const START_OFFSET = { red: 0, green: 13, yellow: 26, blue: 39 };
 const SAFE_CELLS = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
 const ALLOWED_STAKES = [500, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000];
 const DEFAULT_STAKE = 1000;
+const TURN_TIME_LIMIT_MS = 15000;
 
 function createInitialTokens() {
   const tokens = {};
@@ -100,14 +101,37 @@ function publicState(room) {
   return {
     code: room.code,
     stake: room.stake,
-    players: room.players.map((p) => ({ name: p.name, color: p.color, connected: p.connected })),
+    players: room.players.map((p) => ({ name: p.name, color: p.color, connected: p.connected, coins: p.coins })),
     tokens: room.tokens,
     turn: room.players[room.turnIndex] ? room.players[room.turnIndex].color : null,
     dice: room.dice,
     validMoves: room.validMoves,
     started: room.started,
     winner: room.winner,
+    turnDeadline: room.turnDeadline || null,
   };
+}
+
+// Hard per-turn timer: if the current player doesn't finish rolling/moving in
+// time, their turn is force-skipped so the game never stalls on one player.
+function resetTurnTimer(room) {
+  clearTurnTimer(room);
+  room.turnDeadline = Date.now() + TURN_TIME_LIMIT_MS;
+  room.turnTimerHandle = setTimeout(() => handleTurnTimeout(room), TURN_TIME_LIMIT_MS);
+}
+
+function clearTurnTimer(room) {
+  if (room.turnTimerHandle) clearTimeout(room.turnTimerHandle);
+  room.turnTimerHandle = null;
+  room.turnDeadline = null;
+}
+
+function handleTurnTimeout(room) {
+  if (!room.started || room.winner) return;
+  const currentPlayer = room.players[room.turnIndex];
+  const name = currentPlayer ? currentPlayer.name : 'Spieler';
+  passTurn(room);
+  broadcastState(room, { message: `⏱️ Zeit abgelaufen – Zug von ${name} übersprungen!` });
 }
 
 function passTurn(room) {
@@ -115,11 +139,13 @@ function passTurn(room) {
   room.validMoves = [];
   room.sixStreak = 0;
   room.turnIndex = 1 - room.turnIndex;
+  resetTurnTimer(room);
 }
 
 function extraTurn(room) {
   room.dice = null;
   room.validMoves = [];
+  resetTurnTimer(room);
 }
 
 function broadcastState(room, extra) {
@@ -127,12 +153,18 @@ function broadcastState(room, extra) {
 }
 
 io.on('connection', (socket) => {
-  socket.on('createRoom', ({ name, stake }) => {
+  socket.on('createRoom', ({ name, stake, coins }) => {
     const code = generateRoomCode();
     const room = {
       code,
       stake: ALLOWED_STAKES.includes(stake) ? stake : DEFAULT_STAKE,
-      players: [{ id: socket.id, name: (name || 'Spieler 1').slice(0, 16), color: null, connected: true }],
+      players: [{
+        id: socket.id,
+        name: (name || 'Spieler 1').slice(0, 16),
+        color: null,
+        connected: true,
+        coins: typeof coins === 'number' ? coins : null,
+      }],
       turnIndex: 0,
       dice: null,
       validMoves: [],
@@ -140,6 +172,8 @@ io.on('connection', (socket) => {
       tokens: createInitialTokens(),
       started: false,
       winner: null,
+      turnDeadline: null,
+      turnTimerHandle: null,
     };
     rooms.set(code, room);
     socket.join(code);
@@ -147,7 +181,7 @@ io.on('connection', (socket) => {
     socket.emit('roomCreated', { code, state: publicState(room) });
   });
 
-  socket.on('joinRoom', ({ code, name }) => {
+  socket.on('joinRoom', ({ code, name, coins }) => {
     const room = rooms.get((code || '').toUpperCase());
     if (!room) {
       socket.emit('errorMsg', 'Raum nicht gefunden.');
@@ -157,7 +191,13 @@ io.on('connection', (socket) => {
       socket.emit('errorMsg', 'Raum ist bereits voll.');
       return;
     }
-    room.players.push({ id: socket.id, name: (name || 'Spieler 2').slice(0, 16), color: null, connected: true });
+    room.players.push({
+      id: socket.id,
+      name: (name || 'Spieler 2').slice(0, 16),
+      color: null,
+      connected: true,
+      coins: typeof coins === 'number' ? coins : null,
+    });
     socket.join(room.code);
     socket.data.roomCode = room.code;
     socket.emit('roomJoined', { state: publicState(room) });
@@ -184,6 +224,7 @@ io.on('connection', (socket) => {
     if (bothChosen) {
       room.started = true;
       room.turnIndex = 0;
+      resetTurnTimer(room);
     }
 
     socket.emit('colorConfirmed', { color, state: publicState(room) });
@@ -235,6 +276,7 @@ io.on('connection', (socket) => {
 
     if (checkWin(room, color)) {
       room.winner = color;
+      clearTurnTimer(room);
       broadcastState(room, { message: `${currentPlayer.name} hat gewonnen!`, moveInfo });
       return;
     }
@@ -259,6 +301,7 @@ io.on('connection', (socket) => {
     const player = room.players.find((p) => p.id === socket.id);
     if (player) player.connected = false;
 
+    clearTurnTimer(room);
     if (!room.winner) {
       io.to(room.code).emit('opponentLeft', { name: player ? player.name : 'Der Gegner' });
     }

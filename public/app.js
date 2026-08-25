@@ -103,10 +103,19 @@ const btnWaitingCancel = document.getElementById('btn-waiting-cancel');
 const gameRoomLabel = document.getElementById('game-room-label');
 const gameRoomCode = document.getElementById('game-room-code');
 const gameModeLabel = document.getElementById('game-mode-label');
-const namePlayer1El = document.getElementById('name-player1');
-const namePlayer2El = document.getElementById('name-player2');
-const dotPlayer1El = document.getElementById('dot-player1');
-const dotPlayer2El = document.getElementById('dot-player2');
+const hudMeEl = document.getElementById('hud-me');
+const hudOpponentEl = document.getElementById('hud-opponent');
+const avatarMeEl = document.getElementById('avatar-me');
+const avatarOpponentEl = document.getElementById('avatar-opponent');
+const hudMeNameEl = document.getElementById('hud-me-name');
+const hudOpponentNameEl = document.getElementById('hud-opponent-name');
+const hudMeCoinsEl = document.getElementById('hud-me-coins');
+const hudOpponentCoinsEl = document.getElementById('hud-opponent-coins');
+const diceSlotMeEl = document.getElementById('dice-slot-me');
+const diceSlotOpponentEl = document.getElementById('dice-slot-opponent');
+const diceWidgetEl = document.getElementById('dice-widget');
+const turnTimerEl = document.getElementById('turn-timer');
+const btnRefreshApp = document.getElementById('btn-refresh-app');
 const turnBanner = document.getElementById('turn-banner');
 const canvas = document.getElementById('board-canvas');
 const ctx = canvas.getContext('2d');
@@ -150,7 +159,15 @@ let currentStake = null;
 let stakeDeducted = false;
 let payoutSettled = false;
 
+const TURN_TIME_LIMIT_MS = 15000;
+let countdownIntervalHandle = null;
+let localTurnTimeoutHandle = null;
+let wasMyTurnPrev = null; // null = unknown/not yet in a game
+let audioCtx = null;
+
 renderCoins();
+
+btnRefreshApp.addEventListener('click', () => location.reload());
 
 function showScreen(name) {
   Object.entries(screens).forEach(([key, el]) => {
@@ -199,6 +216,10 @@ function leaveAndGoToMenu() {
   payoutSettled = false;
   isAnimating = false;
   animatingTokenInfo = null;
+  wasMyTurnPrev = null;
+  stopCountdownDisplay();
+  if (localTurnTimeoutHandle) clearTimeout(localTurnTimeoutHandle);
+  localTurnTimeoutHandle = null;
   gameoverSection.classList.add('hidden');
   messageToast.textContent = '';
   drawBoard(null);
@@ -258,7 +279,7 @@ btnCreate.addEventListener('click', () => {
   gameMode = 'online';
   stakeDeducted = false;
   payoutSettled = false;
-  socket.emit('createRoom', { name: getPlayerName(), stake });
+  socket.emit('createRoom', { name: getPlayerName(), stake, coins: getCoins() });
 });
 
 btnJoin.addEventListener('click', () => {
@@ -272,7 +293,7 @@ btnJoin.addEventListener('click', () => {
   gameMode = 'online';
   stakeDeducted = false;
   payoutSettled = false;
-  socket.emit('joinRoom', { code, name: getPlayerName() });
+  socket.emit('joinRoom', { code, name: getPlayerName(), coins: getCoins() });
 });
 
 btnCopyCode.addEventListener('click', () => {
@@ -369,8 +390,6 @@ function animateIncomingMove(state) {
 // Applies an authoritative online state update and settles the BoomCoins
 // stake exactly once per game (deducted on start, paid out to the winner).
 function commitOnlineState(state) {
-  applyState(state);
-
   let extra = '';
   if (gameMode === 'online' && currentStake) {
     if (!stakeDeducted && state.started) {
@@ -388,6 +407,8 @@ function commitOnlineState(state) {
       }
     }
   }
+
+  applyState(state);
 
   const msg = `${state.message || ''}${extra}`.trim();
   if (msg) showToast(msg);
@@ -423,12 +444,8 @@ function applyState(state) {
     gameRoomCode.textContent = state.code;
   }
 
-  const p1 = state.players[0];
-  const p2 = state.players[1];
-  namePlayer1El.textContent = p1 ? p1.name : 'Spieler 1';
-  namePlayer2El.textContent = p2 ? p2.name : 'Spieler 2';
-  dotPlayer1El.style.background = p1 && p1.color ? COLOR_HEX[p1.color] : 'transparent';
-  dotPlayer2El.style.background = p2 && p2.color ? COLOR_HEX[p2.color] : 'transparent';
+  updateHud(state);
+  updateDiceSlot(state);
 
   if (state.started) {
     showScreen('game');
@@ -444,11 +461,59 @@ function applyState(state) {
     gameoverSection.classList.remove('hidden');
   }
 
+  if (state.started && !state.winner) {
+    startCountdownDisplay();
+  } else {
+    stopCountdownDisplay();
+  }
+
   updateTurnBanner(state);
   drawBoard(state);
 }
 
+// --- Player HUD cards (avatar, name, BoomCoins) --------------------------------
+function updateHud(state) {
+  const me = state.players.find((p) => p.color === myColor) || {};
+  const opp = state.players.find((p) => p.color && p.color !== myColor) || {};
+
+  avatarMeEl.textContent = (me.name || '?').charAt(0).toUpperCase();
+  avatarMeEl.style.background = myColor ? COLOR_HEX[myColor] : '#555';
+  hudMeNameEl.textContent = me.name || 'Du';
+  hudMeCoinsEl.textContent = `🪙 ${formatBC(getCoins())}`;
+
+  if (gameMode === 'solo') {
+    avatarOpponentEl.textContent = '🤖';
+    avatarOpponentEl.style.background = opp.color ? COLOR_HEX[opp.color] : '#555';
+    hudOpponentNameEl.textContent = opp.name || 'Boom-Bot';
+    hudOpponentCoinsEl.textContent = '🤖 KI-Gegner';
+  } else {
+    avatarOpponentEl.textContent = (opp.name || '?').charAt(0).toUpperCase();
+    avatarOpponentEl.style.background = opp.color ? COLOR_HEX[opp.color] : '#555';
+    hudOpponentNameEl.textContent = opp.name || 'Gegner';
+    hudOpponentCoinsEl.textContent = typeof opp.coins === 'number' ? `🪙 ${formatBC(opp.coins)}` : '';
+  }
+
+  const isMyTurn = state.turn === myColor && !state.winner;
+  hudMeEl.classList.toggle('hud-active', isMyTurn);
+  hudOpponentEl.classList.toggle('hud-active', !isMyTurn && !state.winner);
+}
+
+// Moves the single dice widget over to whichever HUD card belongs to the
+// player who is currently on turn ("wandert" between the two sides).
+function updateDiceSlot(state) {
+  const isMyTurn = state.turn === myColor;
+  const targetSlot = isMyTurn ? diceSlotMeEl : diceSlotOpponentEl;
+  if (diceWidgetEl.parentElement !== targetSlot) {
+    targetSlot.appendChild(diceWidgetEl);
+    diceWidgetEl.classList.remove('dice-widget-move');
+    void diceWidgetEl.offsetWidth; // restart animation
+    diceWidgetEl.classList.add('dice-widget-move');
+  }
+}
+
 function updateTurnBanner(state) {
+  checkTurnTransition(state);
+
   if (state.winner) {
     turnBanner.textContent = 'Spiel beendet';
     turnBanner.className = 'w-full text-center py-2 rounded-xl font-bold text-lg bg-white/10 border border-white/20';
@@ -461,6 +526,62 @@ function updateTurnBanner(state) {
     (isMyTurn
       ? 'bg-gradient-to-r from-emerald-500/80 to-teal-400/80 border-emerald-300'
       : 'bg-white/10 border-white/20');
+  turnBanner.appendChild(turnTimerEl);
+}
+
+// --- Turn countdown display (server/solo-provided deadline, display only) -----
+function startCountdownDisplay() {
+  stopCountdownDisplay();
+  countdownIntervalHandle = setInterval(updateCountdownDisplay, 250);
+  updateCountdownDisplay();
+}
+function stopCountdownDisplay() {
+  if (countdownIntervalHandle) clearInterval(countdownIntervalHandle);
+  countdownIntervalHandle = null;
+  turnTimerEl.textContent = '';
+}
+function updateCountdownDisplay() {
+  if (!currentState || currentState.winner || !currentState.turnDeadline) {
+    turnTimerEl.textContent = '';
+    return;
+  }
+  const seconds = Math.max(0, Math.ceil((currentState.turnDeadline - Date.now()) / 1000));
+  turnTimerEl.textContent = `⏱ ${seconds}s`;
+  turnTimerEl.classList.toggle('text-rose-300', seconds <= 5);
+}
+
+// --- "Your turn!" signal (visual flash + short audio chime) --------------------
+function checkTurnTransition(state) {
+  const isMyTurn = state.turn === myColor && !state.winner;
+  if (isMyTurn && wasMyTurnPrev === false) {
+    flashTurnSignal();
+    playTurnChime();
+  }
+  wasMyTurnPrev = isMyTurn;
+}
+
+function flashTurnSignal() {
+  turnBanner.classList.remove('turn-flash');
+  void turnBanner.offsetWidth; // restart animation
+  turnBanner.classList.add('turn-flash');
+}
+
+function playTurnChime() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.18, audioCtx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.35);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.35);
+  } catch (e) {
+    // Audio not available/blocked - the visual signal alone is enough.
+  }
 }
 
 // --- Dice button --------------------------------------------------------------
@@ -577,10 +698,13 @@ function startSoloGame(chosenColor) {
     tokens,
     started: true,
     winner: null,
+    turnDeadline: null,
   };
+  wasMyTurnPrev = null;
   gameoverSection.classList.add('hidden');
   messageToast.textContent = '';
   showScreen('game');
+  startLocalTurnWindow();
   applyState(localState);
 }
 
@@ -588,16 +712,39 @@ function botColorOf() {
   return localState.players[1].color;
 }
 
+// Mirrors the server's hard per-turn timer for solo mode: gives the human a
+// fresh window on every turn start and force-skips them if it runs out.
+function startLocalTurnWindow() {
+  localState.turnDeadline = Date.now() + TURN_TIME_LIMIT_MS;
+  if (localTurnTimeoutHandle) clearTimeout(localTurnTimeoutHandle);
+  localTurnTimeoutHandle = null;
+  if (localState.turn === myColor) {
+    localTurnTimeoutHandle = setTimeout(handleLocalTurnTimeout, TURN_TIME_LIMIT_MS);
+  }
+}
+
+function handleLocalTurnTimeout() {
+  if (gameMode !== 'solo' || !localState || localState.winner) return;
+  if (localState.turn !== myColor) return;
+  const name = playerLabel(localState.turn);
+  localPassTurn();
+  applyState(localState);
+  showToast(`⏱️ Zeit abgelaufen – Zug von ${name} übersprungen!`);
+  maybeScheduleAiTurn();
+}
+
 function localPassTurn() {
   localState.dice = null;
   localState.validMoves = [];
   localState.sixStreak = 0;
   localState.turn = opponentColorOf(localState, localState.turn);
+  startLocalTurnWindow();
 }
 
 function localExtraTurn() {
   localState.dice = null;
   localState.validMoves = [];
+  startLocalTurnWindow();
 }
 
 function playerLabel(color) {
@@ -666,9 +813,11 @@ function finalizeLocalMove(color, diceValue, captured, finished) {
     localState.winner = color;
     localState.dice = null;
     localState.validMoves = [];
-    applyState(localState);
     if (color === myColor) {
       addCoins(1000);
+    }
+    applyState(localState);
+    if (color === myColor) {
       showToast(`${playerLabel(color)} hat gewonnen! +1.000 BC 🪙`);
     } else {
       showToast(`${playerLabel(color)} hat gewonnen!`);
