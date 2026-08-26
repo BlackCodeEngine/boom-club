@@ -39,6 +39,12 @@ if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
   console.warn('[Supabase] SUPABASE_SERVICE_ROLE_KEY fehlt - Profile (Username/Coins) werden nicht serverseitig verwaltet.');
 }
 
+// Strips a Supabase session down to just the two tokens the client needs to
+// persist (in localStorage) and later present back via 'authRestoreSession'.
+function sessionPayload(session) {
+  return session ? { access_token: session.access_token, refresh_token: session.refresh_token } : null;
+}
+
 // ---------------------------------------------------------------------------
 // Board constants (shared 52-cell ring + 6-cell home stretch per color)
 // ---------------------------------------------------------------------------
@@ -273,6 +279,7 @@ io.on('connection', (socket) => {
       username: trimmedUsername,
       coins: 10000,
       needsEmailConfirmation: !data.session,
+      session: sessionPayload(data.session),
     });
   });
 
@@ -314,6 +321,61 @@ io.on('connection', (socket) => {
       email: user.email,
       username: profile ? profile.username : null,
       coins: profile ? profile.coins : null,
+      session: sessionPayload(data.session),
+    });
+  });
+
+  // Restores a login after a page reload: validates the access_token the
+  // client saved in localStorage, refreshing it via the refresh_token if it
+  // has expired, so the player doesn't get bounced back to the login screen.
+  socket.on('authRestoreSession', async ({ access_token, refresh_token } = {}) => {
+    if (!supabase) {
+      socket.emit('authRestoreFailed', 'Supabase ist serverseitig nicht konfiguriert.');
+      return;
+    }
+    if (!access_token || !refresh_token) {
+      socket.emit('authRestoreFailed', 'Keine gültige Sitzung gefunden.');
+      return;
+    }
+
+    let user = null;
+    let session = { access_token, refresh_token };
+
+    const { data: userData } = await supabase.auth.getUser(access_token);
+    if (userData && userData.user) {
+      user = userData.user;
+    } else {
+      const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession({ refresh_token });
+      if (refreshError || !refreshData.session) {
+        socket.emit('authRestoreFailed', 'Sitzung abgelaufen - bitte erneut einloggen.');
+        return;
+      }
+      user = refreshData.user;
+      session = sessionPayload(refreshData.session);
+    }
+
+    socket.data.userId = user.id;
+
+    let profile = null;
+    if (supabaseAdmin) {
+      const { data: profileData, error: profileError } = await supabaseAdmin
+        .from('profiles')
+        .select('username, coins')
+        .eq('id', user.id)
+        .single();
+      if (profileError) {
+        console.error('[Supabase] Profil konnte nicht geladen werden:', profileError.message);
+      } else {
+        profile = profileData;
+      }
+    }
+
+    socket.emit('authLoggedIn', {
+      userId: user.id,
+      email: user.email,
+      username: profile ? profile.username : null,
+      coins: profile ? profile.coins : null,
+      session,
     });
   });
 

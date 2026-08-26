@@ -75,6 +75,26 @@ function clearReconnectInfo() {
   localStorage.removeItem(RECONNECT_KEY);
 }
 
+// --- Auth session (persisted) -------------------------------------------------
+// Keeps a logged-in player logged in across page reloads (e.g. the in-app
+// refresh button) instead of dropping them back to the login screen.
+const SESSION_KEY = 'boomclub_session';
+function saveSession(session) {
+  if (!session) return;
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+}
+function getSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function clearSession() {
+  localStorage.removeItem(SESSION_KEY);
+}
+
 // --- BoomCoins wallet (persisted) ---------------------------------------------
 const COINS_KEY = 'boomclub_coins';
 const DEFAULT_COINS = 10000;
@@ -153,6 +173,7 @@ const btnNavSettings = document.getElementById('btn-nav-settings');
 const btnOnlineBack = document.getElementById('btn-online-back');
 const btnSettingsBack = document.getElementById('btn-settings-back');
 const settingsNameInput = document.getElementById('settings-name-input');
+const btnLogout = document.getElementById('btn-logout');
 const btnBackToMenu = document.getElementById('btn-back-to-menu');
 
 const btnColorSelectBack = document.getElementById('btn-colorselect-back');
@@ -412,7 +433,7 @@ formLoginEl.addEventListener('submit', (evt) => {
   socket.emit('authLogin', { email, password });
 });
 
-socket.on('authRegistered', ({ username, coins, needsEmailConfirmation }) => {
+socket.on('authRegistered', ({ username, coins, needsEmailConfirmation, session }) => {
   btnRegisterSubmit.disabled = false;
 
   if (needsEmailConfirmation) {
@@ -427,22 +448,33 @@ socket.on('authRegistered', ({ username, coins, needsEmailConfirmation }) => {
 
   if (username) setPlayerName(username);
   if (typeof coins === 'number') setCoins(coins);
+  if (session) saveSession(session);
 
   registerSuccessEl.textContent = `🎉 Willkommen, ${username || 'Spieler'}! Dein Konto wurde erstellt.`;
   registerSuccessEl.classList.remove('hidden');
   setTimeout(() => showScreen('mainMenu'), 1200);
 });
 
-socket.on('authLoggedIn', ({ userId, username, coins }) => {
+socket.on('authLoggedIn', ({ userId, username, coins, session }) => {
+  hideReconnectBanner();
   btnLoginSubmit.disabled = false;
   loggedInUserId = userId;
 
   if (username) setPlayerName(username);
   if (typeof coins === 'number') setCoins(coins);
+  if (session) saveSession(session);
 
   loginSuccessEl.textContent = `🎉 Willkommen zurück${username ? ', ' + username : ''}!`;
   loginSuccessEl.classList.remove('hidden');
   setTimeout(() => showScreen('mainMenu'), 1000);
+});
+
+// Session restore (silent, on page load) failed or expired - go back to a
+// clean login screen instead of leaving the player stuck on a blank state.
+socket.on('authRestoreFailed', () => {
+  hideReconnectBanner();
+  clearSession();
+  showScreen('account');
 });
 
 socket.on('authError', (msg) => {
@@ -475,6 +507,11 @@ btnNavShop.addEventListener('click', () => {}); // disabled - coming soon
 btnNavSettings.addEventListener('click', () => showScreen('settings'));
 btnOnlineBack.addEventListener('click', () => showScreen('mainMenu'));
 btnSettingsBack.addEventListener('click', () => showScreen('mainMenu'));
+btnLogout.addEventListener('click', () => {
+  clearSession();
+  loggedInUserId = null;
+  showScreen('account');
+});
 btnWaitingCancel.addEventListener('click', () => leaveAndGoToMenu());
 btnBackToMenu.addEventListener('click', () => leaveAndGoToMenu());
 btnColorSelectBack.addEventListener('click', () => leaveAndGoToMenu());
@@ -1465,6 +1502,15 @@ canvas.addEventListener('click', (evt) => {
     socket.emit('moveToken', { tokenIndex: best.idx });
   }
 });
+
+// Returning to the page with a saved login: try to restore it silently
+// instead of forcing the player through the login form again.
+const savedSession = getSession();
+if (savedSession) {
+  ensureConnected();
+  showReconnectBanner('🔐 Sitzung wird wiederhergestellt...');
+  socket.emit('authRestoreSession', savedSession);
+}
 
 // initial empty draw
 drawBoard(null);
