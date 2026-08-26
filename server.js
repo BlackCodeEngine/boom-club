@@ -56,6 +56,12 @@ const ALLOWED_STAKES = [500, 1000, 5000, 10000, 20000, 50000, 100000, 200000, 50
 const DEFAULT_STAKE = 1000;
 const TURN_TIME_LIMIT_MS = 15000;
 const RECONNECT_GRACE_MS = 30000;
+const BOT_TURN_DELAY_MS = [700, 1500]; // [min, max] "thinking time" before a bot acts
+
+// Diagonal color pairs share a "family"/team in 2v2 - matches the board's
+// corner-yard geometry (red top-left / yellow bottom-right, green top-right
+// / blue bottom-left), the classic Ludo team convention.
+const TEAM_COLORS = { A: ['red', 'yellow'], B: ['green', 'blue'] };
 
 // ---------------------------------------------------------------------------
 // XP / level progression (persisted to `profiles`, bonus items in `player_items`)
@@ -72,9 +78,60 @@ function createInitialTokens() {
   return tokens;
 }
 
-function opponentColorOf(room, color) {
-  const other = room.players.find((p) => p.color !== color);
-  return other ? other.color : null;
+function teamOfColor(room, color) {
+  if (room.mode !== 'mp2v2') return null;
+  return TEAM_COLORS.A.includes(color) ? 'A' : 'B';
+}
+
+// Every active color that may be captured by / may capture `color`: in
+// free-for-all modes that's everyone else, in 2v2 it excludes the teammate.
+function enemyColorsOf(room, color) {
+  if (room.mode !== 'mp2v2') {
+    return room.activeColors.filter((c) => c !== color);
+  }
+  const myTeam = teamOfColor(room, color);
+  return room.activeColors.filter((c) => c !== color && teamOfColor(room, c) !== myTeam);
+}
+
+// Rotates to the next player whose color hasn't already finished (all tokens
+// home) - lets a 2v2 team keep playing after one of its two colors is done,
+// waiting on the teammate, without ever handing that finished color a turn.
+function advanceTurn(room) {
+  const n = room.players.length;
+  for (let step = 1; step <= n; step++) {
+    const idx = (room.turnIndex + step) % n;
+    const candidate = room.players[idx];
+    if (candidate.color && !checkWin(room, candidate.color)) {
+      room.turnIndex = idx;
+      return;
+    }
+  }
+  room.turnIndex = (room.turnIndex + 1) % n;
+}
+
+function pickAvailableColor(room) {
+  const taken = room.players.filter((p) => p.color).map((p) => p.color);
+  const pool = COLORS_ALL.filter((c) => !taken.includes(c));
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Fills the remaining lobby slots (up to `count`) with bot players, each
+// immediately assigned a free color so the lobby shows them as taken.
+function addBotPlayers(room, count) {
+  for (let i = 0; i < count; i++) {
+    const botNumber = room.players.filter((p) => p.isBot).length + 1;
+    room.players.push({
+      id: `bot-${crypto.randomUUID()}`,
+      playerId: crypto.randomUUID(),
+      userId: null,
+      name: `Boom-Bot ${botNumber}`,
+      color: pickAvailableColor(room),
+      isBot: true,
+      connected: true,
+      coins: null,
+      disconnectTimerHandle: null,
+    });
+  }
 }
 
 function computeValidMoves(tokens, diceValue) {
@@ -98,24 +155,24 @@ function applyMove(room, color, tokenIndex, diceValue) {
   const newD = d === -1 ? 0 : d + diceValue;
   const firstStep = d === -1 ? 0 : d + 1;
 
-  const opp = opponentColorOf(room, color);
-  const oppTokens = opp ? room.tokens[opp] : null;
+  const enemyColors = enemyColorsOf(room, color);
 
   let captured = false;
-  if (oppTokens) {
-    for (let step = firstStep; step <= newD && step <= 50; step++) {
-      const abs = (START_OFFSET[color] + step) % RING_LENGTH;
-      if (SAFE_CELLS.has(abs)) continue;
-      for (let i = 0; i < oppTokens.length; i++) {
-        if (oppTokens[i] >= 0 && oppTokens[i] <= 50) {
-          const oppAbs = (START_OFFSET[opp] + oppTokens[i]) % RING_LENGTH;
-          if (oppAbs === abs) {
-            oppTokens[i] = -1;
+  for (let step = firstStep; step <= newD && step <= 50; step++) {
+    const abs = (START_OFFSET[color] + step) % RING_LENGTH;
+    if (SAFE_CELLS.has(abs)) continue;
+    enemyColors.forEach((enemyColor) => {
+      const enemyTokens = room.tokens[enemyColor];
+      for (let i = 0; i < enemyTokens.length; i++) {
+        if (enemyTokens[i] >= 0 && enemyTokens[i] <= 50) {
+          const enemyAbs = (START_OFFSET[enemyColor] + enemyTokens[i]) % RING_LENGTH;
+          if (enemyAbs === abs) {
+            enemyTokens[i] = -1;
             captured = true;
           }
         }
       }
-    }
+    });
   }
 
   tokens[tokenIndex] = newD;
@@ -146,24 +203,38 @@ function generateRoomCode() {
 function publicState(room) {
   return {
     code: room.code,
+    mode: room.mode,
     stake: room.stake,
-    players: room.players.map((p) => ({ name: p.name, color: p.color, connected: p.connected, coins: p.coins })),
+    activeColors: room.activeColors,
+    players: room.players.map((p) => ({
+      name: p.name,
+      color: p.color,
+      connected: p.connected,
+      coins: p.coins,
+      isBot: p.isBot,
+      team: p.color ? teamOfColor(room, p.color) : null,
+    })),
     tokens: room.tokens,
     turn: room.players[room.turnIndex] ? room.players[room.turnIndex].color : null,
     dice: room.dice,
     validMoves: room.validMoves,
     started: room.started,
     winner: room.winner,
+    winnerTeam: room.winnerTeam || null,
     turnDeadline: room.turnDeadline || null,
   };
 }
 
 // Hard per-turn timer: if the current player doesn't finish rolling/moving in
 // time, their turn is force-skipped so the game never stalls on one player.
+// Also the single choke point for "a new turn has begun" - covers game start
+// (selectColor) and every passTurn/extraTurn - so it doubles as the hook that
+// kicks off a bot's automatic turn.
 function resetTurnTimer(room) {
   clearTurnTimer(room);
   room.turnDeadline = Date.now() + TURN_TIME_LIMIT_MS;
   room.turnTimerHandle = setTimeout(() => handleTurnTimeout(room), TURN_TIME_LIMIT_MS);
+  scheduleBotTurnIfNeeded(room);
 }
 
 function clearTurnTimer(room) {
@@ -184,7 +255,7 @@ function passTurn(room) {
   room.dice = null;
   room.validMoves = [];
   room.sixStreak = 0;
-  room.turnIndex = 1 - room.turnIndex;
+  advanceTurn(room);
   resetTurnTimer(room);
 }
 
@@ -196,6 +267,54 @@ function extraTurn(room) {
 
 function broadcastState(room, extra) {
   io.to(room.code).emit('state', { ...publicState(room), ...(extra || {}) });
+}
+
+// If it's now a bot's turn, roll for it after a short "thinking" delay - the
+// stale-timer guards re-check room/turn state since a human could finish the
+// game (or the bot's turn could pass again) before the timeout fires.
+function scheduleBotTurnIfNeeded(room) {
+  if (!room.started || room.winner) return;
+  const player = room.players[room.turnIndex];
+  if (!player || !player.isBot) return;
+  const [minDelay, maxDelay] = BOT_TURN_DELAY_MS;
+  const delay = minDelay + Math.random() * (maxDelay - minDelay);
+  setTimeout(() => {
+    if (!rooms.has(room.code) || room.winner || !room.started) return;
+    if (room.players[room.turnIndex] !== player) return;
+    if (room.dice !== null) return; // already rolled (shouldn't happen, but stay safe)
+    handleRollDice(room, player);
+  }, delay);
+}
+
+// Mirrors the client's solo-mode AI heuristic (see aiPickMove in app.js):
+// prefer a capturing move, then leaving base on a 6, else the token that's
+// furthest along.
+function botPickMove(room, player, diceValue) {
+  const color = player.color;
+  const tokens = room.tokens[color];
+  const validMoves = room.validMoves;
+  const enemyColors = enemyColorsOf(room, color);
+
+  function wouldCapture(tokenIndex) {
+    const d = tokens[tokenIndex];
+    const newD = d === -1 ? 0 : d + diceValue;
+    if (newD < 0 || newD > 50) return false;
+    const abs = (START_OFFSET[color] + newD) % RING_LENGTH;
+    if (SAFE_CELLS.has(abs)) return false;
+    return enemyColors.some((ec) => room.tokens[ec].some(
+      (od) => od >= 0 && od <= 50 && (START_OFFSET[ec] + od) % RING_LENGTH === abs
+    ));
+  }
+
+  const capturing = validMoves.filter(wouldCapture);
+  if (capturing.length) return capturing[0];
+
+  if (diceValue === 6) {
+    const enteringBase = validMoves.filter((i) => tokens[i] === -1);
+    if (enteringBase.length) return enteringBase[0];
+  }
+
+  return [...validMoves].sort((a, b) => tokens[b] - tokens[a])[0];
 }
 
 function levelForXp(xp) {
@@ -258,6 +377,89 @@ async function awardXp(targetSocketId, userId, xpEarned) {
     coinsAwarded,
     itemAwarded,
   });
+}
+
+// Shared by the 'rollDice' socket handler and the bot turn scheduler so
+// bots and humans roll through the exact same rules.
+function handleRollDice(room, player) {
+  const value = 1 + Math.floor(Math.random() * 6);
+  room.sixStreak = value === 6 ? room.sixStreak + 1 : 0;
+
+  if (room.sixStreak === 3) {
+    room.dice = value;
+    io.to(room.code).emit('diceRolled', { value, color: player.color, validMoves: [] });
+    passTurn(room);
+    broadcastState(room, { message: '3x Sechs hintereinander – Zug verfällt!' });
+    return;
+  }
+
+  const validMoves = computeValidMoves(room.tokens[player.color], value);
+  room.dice = value;
+  room.validMoves = validMoves;
+  io.to(room.code).emit('diceRolled', { value, color: player.color, validMoves });
+
+  if (validMoves.length === 0) {
+    passTurn(room);
+    broadcastState(room, { message: `Keine gültigen Züge für ${player.name}.` });
+    return;
+  }
+
+  broadcastState(room);
+
+  if (player.isBot) {
+    const [minDelay, maxDelay] = BOT_TURN_DELAY_MS;
+    const delay = minDelay + Math.random() * (maxDelay - minDelay);
+    setTimeout(() => {
+      if (!rooms.has(room.code) || room.winner || room.dice !== value) return;
+      if (room.players[room.turnIndex] !== player) return;
+      handleMoveToken(room, player, botPickMove(room, player, value));
+    }, delay);
+  }
+}
+
+// Shared by the 'moveToken' socket handler and the bot turn scheduler.
+function handleMoveToken(room, player, tokenIndex) {
+  if (room.dice === null || !room.validMoves.includes(tokenIndex)) return;
+
+  const diceValue = room.dice;
+  const color = player.color;
+  const moveInfo = { color, tokenIndex, diceValue };
+  const { captured, finished } = applyMove(room, color, tokenIndex, diceValue);
+
+  if (checkWin(room, color)) {
+    const team = teamOfColor(room, color);
+    const teammateColor = team
+      ? room.activeColors.find((c) => c !== color && teamOfColor(room, c) === team)
+      : null;
+    const teamDone = !teammateColor || checkWin(room, teammateColor);
+
+    if (teamDone) {
+      room.winner = color;
+      room.winnerTeam = team;
+      clearTurnTimer(room);
+      const winningColors = teammateColor ? [color, teammateColor] : [color];
+      broadcastState(room, { message: `${player.name} hat gewonnen!`, moveInfo });
+
+      room.players.forEach((p) => {
+        if (!p.userId) return;
+        awardXp(p.id, p.userId, winningColors.includes(p.color) ? XP_WIN : XP_LOSS);
+      });
+      return;
+    }
+    // This color is finished but the teammate isn't yet - the game keeps
+    // going; advanceTurn() will skip this color's future turns automatically.
+  }
+
+  let message = null;
+  if (captured) message = `${player.name} hat einen Spielstein geschlagen! 💥`;
+  else if (finished) message = `${player.name} hat einen Stein ins Ziel gebracht!`;
+
+  if (diceValue === 6) {
+    extraTurn(room);
+  } else {
+    passTurn(room);
+  }
+  broadcastState(room, { message, moveInfo });
 }
 
 io.on('connection', (socket) => {
@@ -456,11 +658,17 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('createRoom', ({ name, stake, coins }) => {
+  socket.on('createRoom', ({ name, stake, coins, mode, botCount }) => {
+    const resolvedMode = mode === 'mp2v2' ? 'mp2v2' : 'mp1v1';
+    const maxPlayers = resolvedMode === 'mp2v2' ? 4 : 2;
+    const clampedBotCount = Math.max(0, Math.min(maxPlayers - 1, parseInt(botCount, 10) || 0));
+
     const code = generateRoomCode();
     const playerId = crypto.randomUUID();
     const room = {
       code,
+      mode: resolvedMode,
+      maxPlayers,
       stake: ALLOWED_STAKES.includes(stake) ? stake : DEFAULT_STAKE,
       players: [{
         id: socket.id,
@@ -468,6 +676,7 @@ io.on('connection', (socket) => {
         userId: socket.data.userId || null,
         name: (name || 'Spieler 1').slice(0, 16),
         color: null,
+        isBot: false,
         connected: true,
         coins: typeof coins === 'number' ? coins : null,
         disconnectTimerHandle: null,
@@ -477,11 +686,14 @@ io.on('connection', (socket) => {
       validMoves: [],
       sixStreak: 0,
       tokens: createInitialTokens(),
+      activeColors: [],
       started: false,
       winner: null,
+      winnerTeam: null,
       turnDeadline: null,
       turnTimerHandle: null,
     };
+    addBotPlayers(room, clampedBotCount);
     rooms.set(code, room);
     socket.join(code);
     socket.data.roomCode = code;
@@ -494,7 +706,7 @@ io.on('connection', (socket) => {
       socket.emit('errorMsg', 'Raum nicht gefunden.');
       return;
     }
-    if (room.players.length >= 2) {
+    if (room.players.length >= room.maxPlayers) {
       socket.emit('errorMsg', 'Raum ist bereits voll.');
       return;
     }
@@ -503,8 +715,9 @@ io.on('connection', (socket) => {
       id: socket.id,
       playerId,
       userId: socket.data.userId || null,
-      name: (name || 'Spieler 2').slice(0, 16),
+      name: (name || `Spieler ${room.players.length + 1}`).slice(0, 16),
       color: null,
+      isBot: false,
       connected: true,
       coins: typeof coins === 'number' ? coins : null,
       disconnectTimerHandle: null,
@@ -558,10 +771,11 @@ io.on('connection', (socket) => {
 
     player.color = color;
 
-    const bothChosen = room.players.length === 2 && room.players.every((p) => p.color);
-    if (bothChosen) {
+    const allChosen = room.players.length === room.maxPlayers && room.players.every((p) => p.color);
+    if (allChosen) {
       room.started = true;
       room.turnIndex = 0;
+      room.activeColors = room.players.map((p) => p.color);
       resetTurnTimer(room);
     }
 
@@ -575,29 +789,7 @@ io.on('connection', (socket) => {
     const currentPlayer = room.players[room.turnIndex];
     if (!currentPlayer || currentPlayer.id !== socket.id) return;
     if (room.dice !== null) return; // already rolled, waiting for a move
-
-    const value = 1 + Math.floor(Math.random() * 6);
-    room.sixStreak = value === 6 ? room.sixStreak + 1 : 0;
-
-    if (room.sixStreak === 3) {
-      room.dice = value;
-      io.to(room.code).emit('diceRolled', { value, color: currentPlayer.color, validMoves: [] });
-      passTurn(room);
-      broadcastState(room, { message: '3x Sechs hintereinander – Zug verfällt!' });
-      return;
-    }
-
-    const validMoves = computeValidMoves(room.tokens[currentPlayer.color], value);
-    room.dice = value;
-    room.validMoves = validMoves;
-    io.to(room.code).emit('diceRolled', { value, color: currentPlayer.color, validMoves });
-
-    if (validMoves.length === 0) {
-      passTurn(room);
-      broadcastState(room, { message: `Keine gültigen Züge für ${currentPlayer.name}.` });
-    } else {
-      broadcastState(room);
-    }
+    handleRollDice(room, currentPlayer);
   });
 
   socket.on('moveToken', ({ tokenIndex }) => {
@@ -605,34 +797,7 @@ io.on('connection', (socket) => {
     if (!room || !room.started || room.winner) return;
     const currentPlayer = room.players[room.turnIndex];
     if (!currentPlayer || currentPlayer.id !== socket.id) return;
-    if (room.dice === null || !room.validMoves.includes(tokenIndex)) return;
-
-    const diceValue = room.dice;
-    const color = currentPlayer.color;
-    const moveInfo = { color, tokenIndex, diceValue };
-    const { captured, finished } = applyMove(room, color, tokenIndex, diceValue);
-
-    if (checkWin(room, color)) {
-      room.winner = color;
-      clearTurnTimer(room);
-      broadcastState(room, { message: `${currentPlayer.name} hat gewonnen!`, moveInfo });
-
-      const loserPlayer = room.players.find((p) => p !== currentPlayer);
-      if (currentPlayer.userId) awardXp(currentPlayer.id, currentPlayer.userId, XP_WIN);
-      if (loserPlayer && loserPlayer.userId) awardXp(loserPlayer.id, loserPlayer.userId, XP_LOSS);
-      return;
-    }
-
-    let message = null;
-    if (captured) message = `${currentPlayer.name} hat einen Spielstein geschlagen! 💥`;
-    else if (finished) message = `${currentPlayer.name} hat einen Stein ins Ziel gebracht!`;
-
-    if (diceValue === 6) {
-      extraTurn(room);
-    } else {
-      passTurn(room);
-    }
-    broadcastState(room, { message, moveInfo });
+    handleMoveToken(room, currentPlayer, tokenIndex);
   });
 
   socket.on('disconnect', () => {

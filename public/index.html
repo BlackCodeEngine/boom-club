@@ -53,6 +53,33 @@
   }
   .taken-label { font-size: 0.65rem; font-weight: 500; opacity: 0.8; }
 
+  .mode-tab {
+    padding: 0.55rem 0.5rem;
+    border-radius: 0.75rem;
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: rgba(224, 231, 255, 0.7);
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+  .mode-tab.active {
+    background: rgba(255,255,255,0.9);
+    color: #312e81;
+  }
+
+  /* Team accent rings in 2v2 - deliberately distinct from the 4 piece colors */
+  .hud-card.team-a { border-color: rgba(245, 158, 11, 0.85); }
+  .hud-card.team-b { border-color: rgba(34, 211, 238, 0.85); }
+  .team-badge {
+    font-size: 0.62rem;
+    font-weight: 800;
+    border-radius: 9999px;
+    padding: 0.05rem 0.45rem;
+    display: inline-block;
+    margin-top: 0.1rem;
+  }
+  .team-badge.team-a { background: rgba(245, 158, 11, 0.25); color: #fcd34d; }
+  .team-badge.team-b { background: rgba(34, 211, 238, 0.25); color: #67e8f9; }
+
   .hud-card {
     display: flex;
     align-items: center;
@@ -336,9 +363,14 @@
       </div>
 
       <div class="space-y-4">
-        <button id="btn-nav-solo" class="menu-btn bg-gradient-to-r from-rose-500 to-orange-400 text-white">
-          🎮 Solo
-          <span class="block text-xs font-normal opacity-80 mt-0.5">Gegen die KI spielen</span>
+        <button id="btn-nav-solo-1v1" class="menu-btn bg-gradient-to-r from-rose-500 to-orange-400 text-white">
+          🎮 Solo 1 vs. 1
+          <span class="block text-xs font-normal opacity-80 mt-0.5">Du gegen einen Boom-Bot</span>
+        </button>
+
+        <button id="btn-nav-solo-1v3" class="menu-btn bg-gradient-to-r from-orange-500 to-amber-400 text-white">
+          🤖 Solo 1 vs. 3
+          <span class="block text-xs font-normal opacity-80 mt-0.5">Du gegen drei Boom-Bots</span>
         </button>
 
         <button id="btn-nav-online" class="menu-btn bg-gradient-to-r from-emerald-500 to-teal-400 text-white">
@@ -366,6 +398,27 @@
       </div>
 
       <div class="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl p-6 space-y-6 border border-white/20">
+        <div>
+          <label class="block text-sm font-medium text-indigo-200 mb-1">Modus</label>
+          <div class="flex gap-1 bg-black/20 rounded-xl p-1">
+            <button id="mode-tab-1v1" type="button" class="mode-tab active flex-1">1 vs. 1</button>
+            <button id="mode-tab-2v2" type="button" class="mode-tab flex-1">2 vs. 2 Team</button>
+          </div>
+          <p class="text-xs text-indigo-300 mt-1">
+            2vs2: Team A (Rot+Gelb) gegen Team B (Grün+Blau). Eigene Team-Steine schlagen sich nicht.
+          </p>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium text-indigo-200 mb-1">KI-Plätze auffüllen</label>
+          <select id="bot-count-select"
+            class="w-full rounded-xl px-4 py-3 bg-white/90 text-gray-900 font-semibold focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
+            <option value="0" selected>0 – auf Mitspieler warten</option>
+            <option value="1">1 KI-Gegner</option>
+          </select>
+          <p class="text-xs text-indigo-300 mt-1">Nicht besetzte Plätze warten auf Mitspieler per Raum-Code.</p>
+        </div>
+
         <div>
           <label class="block text-sm font-medium text-indigo-200 mb-1">Einsatz (Buy-in)</label>
           <select id="stake-select"
@@ -476,17 +529,8 @@
         </div>
       </div>
 
-      <!-- Opponent HUD card (top) -->
-      <div id="hud-opponent" class="hud-card">
-        <div class="hud-info">
-          <div id="avatar-opponent" class="hud-avatar">?</div>
-          <div>
-            <div id="hud-opponent-name" class="hud-name">Gegner</div>
-            <div id="hud-opponent-coins" class="hud-coins"></div>
-          </div>
-        </div>
-        <div id="dice-slot-opponent" class="dice-slot"></div>
-      </div>
+      <!-- Opponent HUD cards (top) - 1 to 3 cards, built dynamically per game -->
+      <div id="hud-opponents" class="w-full flex flex-col gap-2"></div>
 
       <div id="turn-banner" class="w-full text-center py-2 rounded-xl font-bold text-lg bg-white/10 border border-white/20 transition-colors">
         Warte... <span id="turn-timer" class="ml-1"></span>
@@ -503,6 +547,7 @@
           <div>
             <div id="hud-me-name" class="hud-name">Du</div>
             <div id="hud-me-coins" class="hud-coins"></div>
+            <span id="hud-me-team" class="team-badge hidden"></span>
           </div>
         </div>
         <div id="dice-slot-me" class="dice-slot">

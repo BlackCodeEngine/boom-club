@@ -40,11 +40,11 @@ const COLOR_DARK = { red: '#7f1d1d', blue: '#1e3a8a', yellow: '#854d0e', green: 
 const COLOR_LABELS = { red: 'Rot', blue: 'Blau', yellow: 'Gelb', green: 'Grün' };
 const ALL_COLORS = ['red', 'blue', 'yellow', 'green'];
 
-function COLORS() { return ALL_COLORS; }
-
-function opponentColorOf(state, color) {
-  const other = state.players.find((p) => p.color !== color);
-  return other ? other.color : null;
+// Every active color that may capture / be captured by `color` - used by the
+// solo local engine (no teams there, so it's simply "everyone else active").
+function enemyColorsOf(state, color) {
+  const active = state.activeColors || ALL_COLORS;
+  return active.filter((c) => c !== color);
 }
 
 // --- Player name (persisted) -------------------------------------------------
@@ -172,15 +172,12 @@ const gameRoomLabel = document.getElementById('game-room-label');
 const gameRoomCode = document.getElementById('game-room-code');
 const gameModeLabel = document.getElementById('game-mode-label');
 const hudMeEl = document.getElementById('hud-me');
-const hudOpponentEl = document.getElementById('hud-opponent');
+const hudOpponentsEl = document.getElementById('hud-opponents');
 const avatarMeEl = document.getElementById('avatar-me');
-const avatarOpponentEl = document.getElementById('avatar-opponent');
 const hudMeNameEl = document.getElementById('hud-me-name');
-const hudOpponentNameEl = document.getElementById('hud-opponent-name');
 const hudMeCoinsEl = document.getElementById('hud-me-coins');
-const hudOpponentCoinsEl = document.getElementById('hud-opponent-coins');
+const hudMeTeamEl = document.getElementById('hud-me-team');
 const diceSlotMeEl = document.getElementById('dice-slot-me');
-const diceSlotOpponentEl = document.getElementById('dice-slot-opponent');
 const diceWidgetEl = document.getElementById('dice-widget');
 const turnTimerEl = document.getElementById('turn-timer');
 const btnRefreshApp = document.getElementById('btn-refresh-app');
@@ -195,7 +192,8 @@ const gameoverText = document.getElementById('gameover-text');
 const gameoverXpEl = document.getElementById('gameover-xp');
 const btnRestart = document.getElementById('btn-restart');
 
-const btnNavSolo = document.getElementById('btn-nav-solo');
+const btnNavSolo1v1 = document.getElementById('btn-nav-solo-1v1');
+const btnNavSolo1v3 = document.getElementById('btn-nav-solo-1v3');
 const btnNavOnline = document.getElementById('btn-nav-online');
 const btnNavShop = document.getElementById('btn-nav-shop');
 const btnNavSettings = document.getElementById('btn-nav-settings');
@@ -239,6 +237,9 @@ const levelBarEl = document.getElementById('level-bar');
 const levelValueEl = document.getElementById('level-value');
 const xpBarFillEl = document.getElementById('xp-bar-fill');
 const xpValueEl = document.getElementById('xp-value');
+const modeTab1v1El = document.getElementById('mode-tab-1v1');
+const modeTab2v2El = document.getElementById('mode-tab-2v2');
+const botCountSelectEl = document.getElementById('bot-count-select');
 const stakeSelectEl = document.getElementById('stake-select');
 const waitingStakeEl = document.getElementById('waiting-stake');
 const reconnectBannerEl = document.getElementById('reconnect-banner');
@@ -248,11 +249,13 @@ const CELL = canvas.width / GRID;
 let myColor = null;
 let gameMode = null; // 'solo' | 'solo-pending' | 'online'
 let colorSelectContext = null; // 'solo' | 'online'
+let pendingBotCount = 0; // bots to fill in for the game about to be started
+let onlineMode = 'mp1v1'; // 'mp1v1' | 'mp2v2', selected in the online menu
 let currentState = null;
 let localState = null; // only used in solo mode
 let toastTimer = null;
 let isAnimating = false;
-let animatingTokenInfo = null; // { color, idx, cell: [row, col] }
+let animatingTokenInfo = null; // { color, idx, pixel: {x, y} }
 
 let currentStake = null;
 let stakeDeducted = false;
@@ -545,15 +548,41 @@ btnPlayGuest.addEventListener('click', () => showScreen('mainMenu'));
 settingsNameInput.value = getPlayerName();
 settingsNameInput.addEventListener('input', () => setPlayerName(settingsNameInput.value));
 
-btnNavSolo.addEventListener('click', () => {
+btnNavSolo1v1.addEventListener('click', () => {
   gameMode = 'solo-pending';
+  pendingBotCount = 1;
   colorSelectSubtitle.textContent = 'Der Boom-Bot bekommt automatisch eine der übrigen Farben.';
+  openColorSelect('solo', []);
+});
+btnNavSolo1v3.addEventListener('click', () => {
+  gameMode = 'solo-pending';
+  pendingBotCount = 3;
+  colorSelectSubtitle.textContent = 'Die drei übrigen Farben werden automatisch von Boom-Bots übernommen.';
   openColorSelect('solo', []);
 });
 btnNavOnline.addEventListener('click', () => {
   landingError.textContent = '';
   showScreen('onlineMenu');
 });
+
+// --- Online menu: mode + bot-count selection -----------------------------------
+function setOnlineMode(mode) {
+  onlineMode = mode;
+  modeTab1v1El.classList.toggle('active', mode === 'mp1v1');
+  modeTab2v2El.classList.toggle('active', mode === 'mp2v2');
+  const maxBots = mode === 'mp2v2' ? 3 : 1;
+  const previous = botCountSelectEl.value;
+  botCountSelectEl.innerHTML = '';
+  for (let n = 0; n <= maxBots; n++) {
+    const opt = document.createElement('option');
+    opt.value = String(n);
+    opt.textContent = n === 0 ? '0 – auf Mitspieler warten' : `${n} KI-Gegner`;
+    botCountSelectEl.appendChild(opt);
+  }
+  botCountSelectEl.value = previous <= maxBots ? previous : '0';
+}
+modeTab1v1El.addEventListener('click', () => setOnlineMode('mp1v1'));
+modeTab2v2El.addEventListener('click', () => setOnlineMode('mp2v2'));
 btnNavShop.addEventListener('click', () => {}); // disabled - coming soon
 btnNavSettings.addEventListener('click', () => showScreen('settings'));
 btnOnlineBack.addEventListener('click', () => showScreen('mainMenu'));
@@ -603,7 +632,8 @@ function openColorSelect(context, takenColors) {
   colorSelectError.textContent = '';
   if (context === 'online') {
     const stakeInfo = currentStake ? `Einsatz: ${formatBC(currentStake)} BC · ` : '';
-    colorSelectSubtitle.textContent = `${stakeInfo}Bereits vergebene Farben sind ausgegraut.`;
+    const teamInfo = onlineMode === 'mp2v2' ? 'Team A: Rot+Gelb, Team B: Grün+Blau · ' : '';
+    colorSelectSubtitle.textContent = `${stakeInfo}${teamInfo}Bereits vergebene Farben sind ausgegraut.`;
   }
   renderColorSelect(takenColors || []);
   showScreen('colorSelect');
@@ -626,7 +656,7 @@ function renderColorSelect(takenColors) {
 
 function handleColorPick(color) {
   if (colorSelectContext === 'solo') {
-    startSoloGame(color);
+    startSoloGame(color, pendingBotCount);
   } else if (colorSelectContext === 'online') {
     colorSelectError.textContent = '';
     socket.emit('selectColor', { color });
@@ -646,7 +676,8 @@ btnCreate.addEventListener('click', () => {
   gameMode = 'online';
   stakeDeducted = false;
   payoutSettled = false;
-  socket.emit('createRoom', { name: getPlayerName(), stake, coins: getCoins() });
+  const botCount = parseInt(botCountSelectEl.value, 10) || 0;
+  socket.emit('createRoom', { name: getPlayerName(), stake, coins: getCoins(), mode: onlineMode, botCount });
 });
 
 btnJoin.addEventListener('click', () => {
@@ -751,8 +782,9 @@ function animateIncomingMove(state) {
   }
   const fromD = bgState.tokens[color][tokenIndex];
   const path = computeStepPath(color, fromD, diceValue);
+  const willFinish = (fromD === -1 ? 0 : fromD + diceValue) === 56;
   isAnimating = true;
-  animateTokenMove(color, tokenIndex, path, bgState, () => {
+  animateTokenMove(color, tokenIndex, path, bgState, willFinish, () => {
     isAnimating = false;
     commitOnlineState(state);
   });
@@ -770,7 +802,9 @@ function commitOnlineState(state) {
     if (!payoutSettled && state.winner) {
       payoutSettled = true;
       const pot = currentStake * 2;
-      if (state.winner === myColor) {
+      const me = state.players.find((p) => p.color === myColor);
+      const iWon = state.winner === myColor || (state.winnerTeam && me && me.team === state.winnerTeam);
+      if (iWon) {
         addCoins(pot);
         extra = ` Du gewinnst den Pot: +${formatBC(pot)} BC! 🪙`;
       } else {
@@ -832,7 +866,8 @@ function applyState(state) {
   if (state.winner) {
     const winnerPlayer = state.players.find((p) => p.color === state.winner);
     const winnerName = winnerPlayer ? winnerPlayer.name : COLOR_LABELS[state.winner];
-    gameoverText.textContent = `🎉 ${winnerName} (${COLOR_LABELS[state.winner]}) gewinnt!`;
+    const teamSuffix = state.winnerTeam ? ` – Team ${state.winnerTeam}` : '';
+    gameoverText.textContent = `🎉 ${winnerName} (${COLOR_LABELS[state.winner]}${teamSuffix}) gewinnt!`;
     gameoverSection.classList.remove('hidden');
   }
 
@@ -846,38 +881,101 @@ function applyState(state) {
   drawBoard(state);
 }
 
+// --- Opponent HUD cards (built dynamically - 1 to 3, one per active color) ----
+// Rebuilt only when the set of opponent colors changes (i.e. once per game),
+// so the persistent #dice-widget DOM node never gets destroyed mid-animation.
+let oppCardRefs = {};
+let hudBuiltKey = null;
+
+function ensureHudCards(state) {
+  const oppColors = state.players.map((p) => p.color).filter((c) => c && c !== myColor);
+  const key = oppColors.join(',');
+  if (key === hudBuiltKey) return;
+  hudBuiltKey = key;
+
+  if (hudOpponentsEl.contains(diceWidgetEl)) {
+    diceSlotMeEl.appendChild(diceWidgetEl);
+  }
+  hudOpponentsEl.innerHTML = '';
+  oppCardRefs = {};
+
+  oppColors.forEach((color) => {
+    const card = document.createElement('div');
+    card.className = 'hud-card';
+    card.innerHTML =
+      '<div class="hud-info">' +
+        `<div class="hud-avatar" style="background:${COLOR_HEX[color]}">?</div>` +
+        '<div>' +
+          '<div class="hud-name">Gegner</div>' +
+          '<div class="hud-coins"></div>' +
+          '<span class="team-badge hidden"></span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="dice-slot"></div>';
+    hudOpponentsEl.appendChild(card);
+    oppCardRefs[color] = {
+      el: card,
+      avatarEl: card.querySelector('.hud-avatar'),
+      nameEl: card.querySelector('.hud-name'),
+      coinsEl: card.querySelector('.hud-coins'),
+      teamBadgeEl: card.querySelector('.team-badge'),
+      diceSlotEl: card.querySelector('.dice-slot'),
+    };
+  });
+}
+
+// Shows/hides the "Team A/B" ring + badge (2v2 only) on a HUD card.
+function updateTeamBadge(cardEl, badgeEl, team) {
+  cardEl.classList.remove('team-a', 'team-b');
+  if (!team) {
+    badgeEl.classList.add('hidden');
+    return;
+  }
+  const cls = team === 'A' ? 'team-a' : 'team-b';
+  cardEl.classList.add(cls);
+  badgeEl.classList.remove('hidden', 'team-a', 'team-b');
+  badgeEl.classList.add(cls);
+  badgeEl.textContent = `Team ${team}`;
+}
+
 // --- Player HUD cards (avatar, name, BoomCoins) --------------------------------
 function updateHud(state) {
-  const me = state.players.find((p) => p.color === myColor) || {};
-  const opp = state.players.find((p) => p.color && p.color !== myColor) || {};
+  ensureHudCards(state);
+  const isTeamMode = state.mode === 'mp2v2';
 
+  const me = state.players.find((p) => p.color === myColor) || {};
   avatarMeEl.textContent = (me.name || '?').charAt(0).toUpperCase();
   avatarMeEl.style.background = myColor ? COLOR_HEX[myColor] : '#555';
   hudMeNameEl.textContent = me.name || 'Du';
   hudMeCoinsEl.textContent = `🪙 ${formatBC(getCoins())}`;
+  updateTeamBadge(hudMeEl, hudMeTeamEl, isTeamMode ? me.team : null);
+  hudMeEl.classList.toggle('hud-active', state.turn === myColor && !state.winner);
 
-  if (gameMode === 'solo') {
-    avatarOpponentEl.textContent = '🤖';
-    avatarOpponentEl.style.background = opp.color ? COLOR_HEX[opp.color] : '#555';
-    hudOpponentNameEl.textContent = opp.name || 'Boom-Bot';
-    hudOpponentCoinsEl.textContent = '🤖 KI-Gegner';
-  } else {
-    avatarOpponentEl.textContent = (opp.name || '?').charAt(0).toUpperCase();
-    avatarOpponentEl.style.background = opp.color ? COLOR_HEX[opp.color] : '#555';
-    hudOpponentNameEl.textContent = opp.name || 'Gegner';
-    hudOpponentCoinsEl.textContent = typeof opp.coins === 'number' ? `🪙 ${formatBC(opp.coins)}` : '';
-  }
+  state.players.forEach((p) => {
+    if (!p.color || p.color === myColor) return;
+    const ref = oppCardRefs[p.color];
+    if (!ref) return;
 
-  const isMyTurn = state.turn === myColor && !state.winner;
-  hudMeEl.classList.toggle('hud-active', isMyTurn);
-  hudOpponentEl.classList.toggle('hud-active', !isMyTurn && !state.winner);
+    const isBotPlayer = gameMode === 'solo' ? isBotColor(p.color) : !!p.isBot;
+    ref.avatarEl.textContent = isBotPlayer ? '🤖' : (p.name || '?').charAt(0).toUpperCase();
+    ref.nameEl.textContent = p.name || (isBotPlayer ? 'Boom-Bot' : 'Gegner');
+    if (gameMode === 'solo') {
+      ref.coinsEl.textContent = '🤖 KI-Gegner';
+    } else {
+      ref.coinsEl.textContent = isBotPlayer ? '🤖 KI-Gegner' : (typeof p.coins === 'number' ? `🪙 ${formatBC(p.coins)}` : '');
+    }
+    updateTeamBadge(ref.el, ref.teamBadgeEl, isTeamMode ? p.team : null);
+    ref.el.classList.toggle('hud-active', state.turn === p.color && !state.winner);
+  });
 }
 
 // Moves the single dice widget over to whichever HUD card belongs to the
-// player who is currently on turn ("wandert" between the two sides).
+// player who is currently on turn ("wandert" between the cards).
 function updateDiceSlot(state) {
-  const isMyTurn = state.turn === myColor;
-  const targetSlot = isMyTurn ? diceSlotMeEl : diceSlotOpponentEl;
+  const targetSlot = state.turn === myColor
+    ? diceSlotMeEl
+    : (oppCardRefs[state.turn] ? oppCardRefs[state.turn].diceSlotEl : null);
+  if (!targetSlot) return;
   if (diceWidgetEl.parentElement !== targetSlot) {
     targetSlot.appendChild(diceWidgetEl);
     diceWidgetEl.classList.remove('dice-widget-move');
@@ -993,24 +1091,24 @@ function applyMove(state, color, tokenIndex, diceValue) {
   const newD = d === -1 ? 0 : d + diceValue;
   const firstStep = d === -1 ? 0 : d + 1;
 
-  const opp = opponentColorOf(state, color);
-  const oppTokens = opp ? state.tokens[opp] : null;
+  const enemyColors = enemyColorsOf(state, color);
 
   let captured = false;
-  if (oppTokens) {
-    for (let step = firstStep; step <= newD && step <= 50; step++) {
-      const abs = (START_OFFSET[color] + step) % RING_LENGTH;
-      if (SAFE_CELLS.has(abs)) continue;
-      for (let i = 0; i < oppTokens.length; i++) {
-        if (oppTokens[i] >= 0 && oppTokens[i] <= 50) {
-          const oppAbs = (START_OFFSET[opp] + oppTokens[i]) % RING_LENGTH;
-          if (oppAbs === abs) {
-            oppTokens[i] = -1;
+  for (let step = firstStep; step <= newD && step <= 50; step++) {
+    const abs = (START_OFFSET[color] + step) % RING_LENGTH;
+    if (SAFE_CELLS.has(abs)) continue;
+    enemyColors.forEach((enemyColor) => {
+      const enemyTokens = state.tokens[enemyColor];
+      for (let i = 0; i < enemyTokens.length; i++) {
+        if (enemyTokens[i] >= 0 && enemyTokens[i] <= 50) {
+          const enemyAbs = (START_OFFSET[enemyColor] + enemyTokens[i]) % RING_LENGTH;
+          if (enemyAbs === abs) {
+            enemyTokens[i] = -1;
             captured = true;
           }
         }
       }
-    }
+    });
   }
 
   tokens[tokenIndex] = newD;
@@ -1032,39 +1130,73 @@ function computeStepPath(color, fromD, diceValue) {
   return path;
 }
 
-function animateTokenMove(color, tokenIndex, path, bgState, onComplete) {
-  let i = 0;
-  const stepMs = 180;
-  function tick() {
-    animatingTokenInfo = { color, idx: tokenIndex, cell: path[i] };
+function cellCenterPx(cell) {
+  const { x, y, w, h } = cellRect(cell[0], cell[1]);
+  return { x: x + w / 2, y: y + h / 2 };
+}
+
+// Glides the token smoothly through every cell in `path` (instead of jumping
+// cell-to-cell) via requestAnimationFrame pixel interpolation, with a glow
+// trailing it. The starting pixel is the token's current spot (base slot or
+// ring/home cell) so even a single-cell hop (e.g. leaving base) still glides.
+// `willFinish` triggers a "💥 Boom" particle burst right as it lands.
+function animateTokenMove(color, tokenIndex, path, bgState, willFinish, onComplete) {
+  const fromD = bgState.tokens[color][tokenIndex];
+  const fromCell = fromD === -1 ? BASE_SPOTS[color][tokenIndex] : tokenCell(color, fromD);
+  const points = [fromCell, ...path].map(cellCenterPx);
+  const stepMs = 140;
+  const totalMs = stepMs * (points.length - 1);
+  const startTime = performance.now();
+
+  function frame(now) {
+    const t = totalMs === 0 ? 1 : Math.min(1, (now - startTime) / totalMs);
+    const rawIndex = t * (points.length - 1);
+    const segIndex = Math.min(points.length - 2, Math.floor(rawIndex));
+    const segT = rawIndex - segIndex;
+    const a = points[segIndex];
+    const b = points[segIndex + 1];
+    animatingTokenInfo = {
+      color,
+      idx: tokenIndex,
+      pixel: { x: a.x + (b.x - a.x) * segT, y: a.y + (b.y - a.y) * segT },
+    };
     drawBoard(bgState);
-    i++;
-    if (i < path.length) {
-      setTimeout(tick, stepMs);
+    if (t < 1) {
+      requestAnimationFrame(frame);
     } else {
       animatingTokenInfo = null;
+      if (willFinish) spawnBoomParticles(points[points.length - 1], color);
       onComplete();
     }
   }
-  tick();
+  requestAnimationFrame(frame);
 }
 
 // ===============================================================================
 // SOLO MODE - local game engine + simple AI opponent (mirrors server rules)
 // ===============================================================================
-function startSoloGame(chosenColor) {
+function startSoloGame(chosenColor, botCount) {
   gameMode = 'solo';
   myColor = chosenColor;
+
+  // Shuffle the remaining colors and take `botCount` of them for the bots -
+  // 1 for "1 vs 1", all 3 for "1 vs 3".
   const remaining = ALL_COLORS.filter((c) => c !== chosenColor);
-  const botColor = remaining[Math.floor(Math.random() * remaining.length)];
+  for (let i = remaining.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+  }
+  const botColors = remaining.slice(0, botCount);
+
   const tokens = {};
   ALL_COLORS.forEach((c) => { tokens[c] = [-1, -1, -1, -1]; });
 
   localState = {
     code: 'SOLO',
+    activeColors: [chosenColor, ...botColors],
     players: [
-      { name: getPlayerName() || 'Du', color: chosenColor },
-      { name: 'Boom-Bot', color: botColor },
+      { name: getPlayerName() || 'Du', color: chosenColor, isBot: false },
+      ...botColors.map((c, i) => ({ name: `Boom-Bot ${i + 1}`, color: c, isBot: true })),
     ],
     turn: chosenColor,
     dice: null,
@@ -1084,8 +1216,19 @@ function startSoloGame(chosenColor) {
   applyState(localState);
 }
 
-function botColorOf() {
-  return localState.players[1].color;
+function isBotColor(color) {
+  const p = localState.players.find((pl) => pl.color === color);
+  return p ? !!p.isBot : false;
+}
+
+// Round-robins to the next player in seat order. Solo games always end the
+// instant any color finishes (see finalizeLocalMove), so - unlike the
+// server's team-aware advanceTurn - there's never an already-finished color
+// left to skip past here.
+function localAdvanceTurn() {
+  const colors = localState.players.map((p) => p.color);
+  const idx = colors.indexOf(localState.turn);
+  localState.turn = colors[(idx + 1) % colors.length];
 }
 
 // Mirrors the server's hard per-turn timer for solo mode: gives the human a
@@ -1113,7 +1256,7 @@ function localPassTurn() {
   localState.dice = null;
   localState.validMoves = [];
   localState.sixStreak = 0;
-  localState.turn = opponentColorOf(localState, localState.turn);
+  localAdvanceTurn();
   startLocalTurnWindow();
 }
 
@@ -1161,7 +1304,7 @@ function localRollDice() {
     }
 
     applyState(localState);
-    if (color === botColorOf()) {
+    if (isBotColor(color)) {
       setTimeout(() => aiMakeMove(), 700 + Math.random() * 600);
     }
   });
@@ -1175,9 +1318,10 @@ function localMoveToken(tokenIndex) {
   const diceValue = localState.dice;
   const fromD = localState.tokens[color][tokenIndex];
   const path = computeStepPath(color, fromD, diceValue);
+  const willFinish = (fromD === -1 ? 0 : fromD + diceValue) === 56;
 
   isAnimating = true;
-  animateTokenMove(color, tokenIndex, path, localState, () => {
+  animateTokenMove(color, tokenIndex, path, localState, willFinish, () => {
     isAnimating = false;
     const { captured, finished } = applyMove(localState, color, tokenIndex, diceValue);
     finalizeLocalMove(color, diceValue, captured, finished);
@@ -1218,22 +1362,30 @@ function finalizeLocalMove(color, diceValue, captured, finished) {
 
 function maybeScheduleAiTurn() {
   if (gameMode !== 'solo' || !localState || localState.winner) return;
-  if (localState.turn !== botColorOf() || localState.dice !== null) return;
+  if (!isBotColor(localState.turn) || localState.dice !== null) return;
   setTimeout(() => {
-    if (gameMode === 'solo' && localState && !localState.winner && localState.turn === botColorOf() && localState.dice === null) {
+    if (gameMode === 'solo' && localState && !localState.winner && isBotColor(localState.turn) && localState.dice === null) {
       localRollDice();
     }
   }, 1000 + Math.random() * 1000);
 }
 
-function aiPickMove(validMoves, tokens, oppTokens, diceValue, color, opp) {
+// Mirrors the server's bot heuristic (see botPickMove in server.js): prefer
+// a capturing move, then leaving base on a 6, else the token furthest along.
+function aiPickMove(state, color, diceValue) {
+  const tokens = state.tokens[color];
+  const validMoves = state.validMoves;
+  const enemyColors = enemyColorsOf(state, color);
+
   function wouldCapture(tokenIndex) {
     const d = tokens[tokenIndex];
     const newD = d === -1 ? 0 : d + diceValue;
     if (newD < 0 || newD > 50) return false;
     const abs = (START_OFFSET[color] + newD) % RING_LENGTH;
     if (SAFE_CELLS.has(abs)) return false;
-    return oppTokens.some((od) => od >= 0 && od <= 50 && (START_OFFSET[opp] + od) % RING_LENGTH === abs);
+    return enemyColors.some((ec) => state.tokens[ec].some(
+      (od) => od >= 0 && od <= 50 && (START_OFFSET[ec] + od) % RING_LENGTH === abs
+    ));
   }
 
   const capturing = validMoves.filter(wouldCapture);
@@ -1244,16 +1396,14 @@ function aiPickMove(validMoves, tokens, oppTokens, diceValue, color, opp) {
     if (enteringBase.length) return enteringBase[0];
   }
 
-  const sorted = [...validMoves].sort((a, b) => tokens[b] - tokens[a]);
-  return sorted[0];
+  return [...validMoves].sort((a, b) => tokens[b] - tokens[a])[0];
 }
 
 function aiMakeMove() {
   if (gameMode !== 'solo' || !localState || localState.winner) return;
-  const color = botColorOf();
-  if (localState.turn !== color || localState.dice === null) return;
-  const opp = opponentColorOf(localState, color);
-  const idx = aiPickMove(localState.validMoves, localState.tokens[color], localState.tokens[opp], localState.dice, color, opp);
+  const color = localState.turn;
+  if (!isBotColor(color) || localState.dice === null) return;
+  const idx = aiPickMove(localState, color, localState.dice);
   localMoveToken(idx);
 }
 
@@ -1273,23 +1423,30 @@ function drawCell(row, col, fill, opts = {}) {
 
 const LIGHT_TINT = { red: '#fca5a5', blue: '#93c5fd', yellow: '#fde047', green: '#86efac' };
 
+// Which colors actually have a player - only these get a yard, home stretch,
+// base slots and tokens drawn (a 1v1 game shows just 2 corners, not all 4).
+function activeColorsOf(state) {
+  return (state && state.activeColors && state.activeColors.length) ? state.activeColors : ALL_COLORS;
+}
+
 function drawBoard(state) {
+  const activeColors = activeColorsOf(state);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   // Background
   ctx.fillStyle = '#1e1b4b';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Corner yards (6x6), one per color
-  drawYard(0, 0, COLOR_DARK.red, LIGHT_TINT.red);       // red yard (top-left)
-  drawYard(0, 9, COLOR_DARK.green, LIGHT_TINT.green);   // green yard (top-right)
-  drawYard(9, 9, COLOR_DARK.yellow, LIGHT_TINT.yellow); // yellow yard (bottom-right)
-  drawYard(9, 0, COLOR_DARK.blue, LIGHT_TINT.blue);     // blue yard (bottom-left)
+  // Corner yards (6x6), one per active color
+  if (activeColors.includes('red')) drawYard(0, 0, COLOR_DARK.red, LIGHT_TINT.red);       // top-left
+  if (activeColors.includes('green')) drawYard(0, 9, COLOR_DARK.green, LIGHT_TINT.green);   // top-right
+  if (activeColors.includes('yellow')) drawYard(9, 9, COLOR_DARK.yellow, LIGHT_TINT.yellow); // bottom-right
+  if (activeColors.includes('blue')) drawYard(9, 0, COLOR_DARK.blue, LIGHT_TINT.blue);     // bottom-left
 
   // Ring path cells
   RING_PATH.forEach(([r, c], idx) => {
     const isSafe = SAFE_CELLS.has(idx);
-    const startColor = ALL_COLORS.find((color) => START_OFFSET[color] === idx);
+    const startColor = activeColors.find((color) => START_OFFSET[color] === idx);
     const fill = startColor ? LIGHT_TINT[startColor] : '#f8fafc';
     drawCell(r, c, fill);
     if (isSafe) {
@@ -1303,7 +1460,7 @@ function drawBoard(state) {
   });
 
   // Home stretch cells
-  ALL_COLORS.forEach((color) => {
+  activeColors.forEach((color) => {
     HOME_PATHS[color].forEach(([r, c]) => drawCell(r, c, LIGHT_TINT[color], { border: 'rgba(0,0,0,0.35)' }));
   });
 
@@ -1311,7 +1468,7 @@ function drawBoard(state) {
   drawCenter();
 
   // Base slots (dashed circles) for waiting tokens
-  COLORS().forEach((color) => {
+  activeColors.forEach((color) => {
     BASE_SPOTS[color].forEach(([r, c]) => {
       const { x, y, w, h } = cellRect(r, c);
       ctx.beginPath();
@@ -1325,6 +1482,7 @@ function drawBoard(state) {
   });
 
   if (state) drawTokens(state);
+  drawParticles();
 }
 
 function drawYard(rowStart, colStart, bg, accent) {
@@ -1374,6 +1532,75 @@ function drawCenter() {
   ctx.textBaseline = 'middle';
   ctx.fillText('🏆', cx, cy + 2);
   ctx.restore();
+}
+
+// --- Glow + "Boom" finish particles --------------------------------------------
+function drawGlow(cx, cy, radius, colorHex) {
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+  grad.addColorStop(0, `${colorHex}aa`);
+  grad.addColorStop(1, `${colorHex}00`);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.restore();
+}
+
+let particles = [];
+let particleAnimHandle = null;
+
+// Short "💥 Boom" burst when a token reaches home - runs its own rAF loop
+// (independent of game-state redraws) since nothing else keeps painting the
+// canvas once the move animation itself has finished.
+function spawnBoomParticles(pixel, color) {
+  const hex = COLOR_HEX[color] || '#ffffff';
+  for (let i = 0; i < 18; i++) {
+    const angle = (Math.PI * 2 * i) / 18 + Math.random() * 0.3;
+    const speed = 2 + Math.random() * 3;
+    particles.push({
+      x: pixel.x,
+      y: pixel.y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 1,
+      color: hex,
+      size: 2 + Math.random() * 2.5,
+    });
+  }
+  startParticleLoop();
+}
+
+function startParticleLoop() {
+  if (particleAnimHandle) return; // already running - new particles just join in
+  let lastTime = performance.now();
+  function tick(now) {
+    const dt = Math.min(48, now - lastTime) / 16.6;
+    lastTime = now;
+    particles.forEach((p) => {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 0.15 * dt; // gravity
+      p.life -= 0.035 * dt;
+    });
+    particles = particles.filter((p) => p.life > 0);
+    drawBoard(gameMode === 'solo' ? localState : currentState);
+    particleAnimHandle = particles.length > 0 ? requestAnimationFrame(tick) : null;
+  }
+  particleAnimHandle = requestAnimationFrame(tick);
+}
+
+function drawParticles() {
+  particles.forEach((p) => {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
 }
 
 // --- Pawn rendering ("Mensch ärgere dich nicht" style: round head + cone body) --
@@ -1441,12 +1668,13 @@ function drawTokens(state) {
   // group tokens by pixel cell so we can offset overlapping ones
   const groups = new Map();
 
-  COLORS().forEach((color) => {
+  activeColorsOf(state).forEach((color) => {
     (state.tokens[color] || []).forEach((dist, idx) => {
+      // The animating token is drawn separately below at its exact
+      // interpolated pixel position, not snapped to a cell/group.
+      if (animatingTokenInfo && animatingTokenInfo.color === color && animatingTokenInfo.idx === idx) return;
       let row, col;
-      if (animatingTokenInfo && animatingTokenInfo.color === color && animatingTokenInfo.idx === idx) {
-        [row, col] = animatingTokenInfo.cell;
-      } else if (dist === -1) {
+      if (dist === -1) {
         [row, col] = BASE_SPOTS[color][idx];
       } else {
         [row, col] = tokenCell(color, dist);
@@ -1491,6 +1719,14 @@ function drawTokens(state) {
       drawPawn(cx, cy, radius, t.color);
     });
   });
+
+  // The moving token: drawn at its interpolated pixel position with a glow.
+  if (animatingTokenInfo) {
+    const { color, pixel } = animatingTokenInfo;
+    const radius = CELL * 0.32;
+    drawGlow(pixel.x, pixel.y, radius * 1.8, COLOR_HEX[color]);
+    drawPawn(pixel.x, pixel.y, radius, color);
+  }
 
   // store hitboxes for click detection (rebuilt each draw)
   buildHitboxes(groups);
