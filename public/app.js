@@ -182,6 +182,12 @@ const diceWidgetEl = document.getElementById('dice-widget');
 const turnTimerEl = document.getElementById('turn-timer');
 const btnRefreshApp = document.getElementById('btn-refresh-app');
 const turnBanner = document.getElementById('turn-banner');
+const boardLabelEls = {
+  red: document.getElementById('board-label-red'),
+  green: document.getElementById('board-label-green'),
+  blue: document.getElementById('board-label-blue'),
+  yellow: document.getElementById('board-label-yellow'),
+};
 const canvas = document.getElementById('board-canvas');
 const ctx = canvas.getContext('2d');
 const btnDice = document.getElementById('btn-dice');
@@ -239,8 +245,8 @@ const xpBarFillEl = document.getElementById('xp-bar-fill');
 const xpValueEl = document.getElementById('xp-value');
 const modeTab1v1El = document.getElementById('mode-tab-1v1');
 const modeTab2v2El = document.getElementById('mode-tab-2v2');
-const botCountSelectEl = document.getElementById('bot-count-select');
 const stakeSelectEl = document.getElementById('stake-select');
+const waitingSlotsEl = document.getElementById('waiting-slots');
 const waitingStakeEl = document.getElementById('waiting-stake');
 const reconnectBannerEl = document.getElementById('reconnect-banner');
 
@@ -251,6 +257,7 @@ let gameMode = null; // 'solo' | 'solo-pending' | 'online'
 let colorSelectContext = null; // 'solo' | 'online'
 let pendingBotCount = 0; // bots to fill in for the game about to be started
 let onlineMode = 'mp1v1'; // 'mp1v1' | 'mp2v2', selected in the online menu
+let amIHost = false; // only the room creator may add bots from the waiting room
 let currentState = null;
 let localState = null; // only used in solo mode
 let toastTimer = null;
@@ -264,6 +271,7 @@ let payoutSettled = false;
 const TURN_TIME_LIMIT_MS = 15000;
 let countdownIntervalHandle = null;
 let localTurnTimeoutHandle = null;
+let botWatchdogHandle = null; // safety net in case a bot's own turn ever gets stuck
 let wasMyTurnPrev = null; // null = unknown/not yet in a game
 let audioCtx = null;
 
@@ -308,11 +316,12 @@ socket.on('disconnect', (reason) => {
   }
 });
 
-socket.on('rejoined', ({ state, color, stake }) => {
+socket.on('rejoined', ({ state, color, stake, isHost }) => {
   hideReconnectBanner();
   gameMode = 'online';
   myColor = color;
   currentStake = stake;
+  amIHost = !!isHost;
 
   if (state.started) {
     commitOnlineState(state);
@@ -320,6 +329,7 @@ socket.on('rejoined', ({ state, color, stake }) => {
   } else if (color) {
     waitingCode.textContent = state.code;
     waitingStakeEl.textContent = stake ? `Einsatz: ${formatBC(stake)} BC` : '';
+    renderWaitingRoom(state);
     showScreen('waiting');
   } else {
     const taken = state.players.filter((p) => p.color).map((p) => p.color);
@@ -565,21 +575,13 @@ btnNavOnline.addEventListener('click', () => {
   showScreen('onlineMenu');
 });
 
-// --- Online menu: mode + bot-count selection -----------------------------------
+// --- Online menu: mode selection -----------------------------------------------
+// Bots are never added automatically - the host fills specific free color
+// slots with a bot from the waiting room instead (see renderWaitingRoom).
 function setOnlineMode(mode) {
   onlineMode = mode;
   modeTab1v1El.classList.toggle('active', mode === 'mp1v1');
   modeTab2v2El.classList.toggle('active', mode === 'mp2v2');
-  const maxBots = mode === 'mp2v2' ? 3 : 1;
-  const previous = botCountSelectEl.value;
-  botCountSelectEl.innerHTML = '';
-  for (let n = 0; n <= maxBots; n++) {
-    const opt = document.createElement('option');
-    opt.value = String(n);
-    opt.textContent = n === 0 ? '0 – auf Mitspieler warten' : `${n} KI-Gegner`;
-    botCountSelectEl.appendChild(opt);
-  }
-  botCountSelectEl.value = previous <= maxBots ? previous : '0';
 }
 modeTab1v1El.addEventListener('click', () => setOnlineMode('mp1v1'));
 modeTab2v2El.addEventListener('click', () => setOnlineMode('mp2v2'));
@@ -676,8 +678,7 @@ btnCreate.addEventListener('click', () => {
   gameMode = 'online';
   stakeDeducted = false;
   payoutSettled = false;
-  const botCount = parseInt(botCountSelectEl.value, 10) || 0;
-  socket.emit('createRoom', { name: getPlayerName(), stake, coins: getCoins(), mode: onlineMode, botCount });
+  socket.emit('createRoom', { name: getPlayerName(), stake, coins: getCoins(), mode: onlineMode });
 });
 
 btnJoin.addEventListener('click', () => {
@@ -703,14 +704,15 @@ btnCopyCode.addEventListener('click', () => {
 btnRestart.addEventListener('click', () => window.location.reload());
 
 // --- Socket events (online multiplayer) ---------------------------------------
-socket.on('roomCreated', ({ code, playerId, state }) => {
+socket.on('roomCreated', ({ code, playerId, isHost, state }) => {
   saveReconnectInfo(code, playerId);
   currentStake = state.stake;
+  amIHost = !!isHost;
   const taken = state.players.filter((p) => p.color).map((p) => p.color);
   openColorSelect('online', taken);
 });
 
-socket.on('roomJoined', ({ playerId, state }) => {
+socket.on('roomJoined', ({ playerId, isHost, state }) => {
   if (getCoins() < state.stake) {
     landingError.textContent = `Nicht genug BoomCoins für den Einsatz von ${formatBC(state.stake)} BC in diesem Raum.`;
     socket.disconnect();
@@ -720,6 +722,7 @@ socket.on('roomJoined', ({ playerId, state }) => {
   }
   saveReconnectInfo(state.code, playerId);
   currentStake = state.stake;
+  amIHost = !!isHost;
   const taken = state.players.filter((p) => p.color).map((p) => p.color);
   openColorSelect('online', taken);
 });
@@ -731,9 +734,48 @@ socket.on('colorConfirmed', ({ color, state }) => {
   } else {
     waitingCode.textContent = state.code;
     waitingStakeEl.textContent = currentStake ? `Einsatz: ${formatBC(currentStake)} BC` : '';
+    renderWaitingRoom(state);
     showScreen('waiting');
   }
 });
+
+// Shows every color slot (taken by a human, taken by a bot, or free) in the
+// waiting room, with host-only buttons to fill any free slot with a bot.
+function renderWaitingRoom(state) {
+  waitingSlotsEl.innerHTML = '';
+  const roomFull = state.players.length >= state.maxPlayers;
+
+  ALL_COLORS.forEach((color) => {
+    const player = state.players.find((p) => p.color === color);
+    const row = document.createElement('div');
+    row.className = 'waiting-slot';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'waiting-slot-swatch';
+    swatch.style.background = COLOR_HEX[color];
+    row.appendChild(swatch);
+
+    const label = document.createElement('span');
+    label.className = 'waiting-slot-label';
+    if (player) {
+      const who = player.isBot ? `🤖 ${player.name}` : player.name + (color === myColor ? ' (Du)' : '');
+      label.textContent = `${COLOR_LABELS[color]}: ${who}`;
+    } else {
+      label.textContent = `${COLOR_LABELS[color]}: frei`;
+    }
+    row.appendChild(label);
+
+    if (!player && amIHost && !roomFull) {
+      const btn = document.createElement('button');
+      btn.className = 'waiting-slot-add-bot';
+      btn.textContent = '🤖 Bot hinzufügen';
+      btn.addEventListener('click', () => socket.emit('addBot', { color }));
+      row.appendChild(btn);
+    }
+
+    waitingSlotsEl.appendChild(row);
+  });
+}
 
 socket.on('diceRolled', ({ value }) => {
   animateDiceRoll(value);
@@ -741,10 +783,14 @@ socket.on('diceRolled', ({ value }) => {
 
 socket.on('state', (state) => {
   if (!state.started) {
-    // lobby-phase update (e.g. opponent joined or picked a color while we wait)
+    // lobby-phase update (e.g. opponent joined, picked a color, or the host
+    // added a bot while we wait)
     if (!screens.colorSelect.classList.contains('hidden')) {
       const taken = state.players.filter((p) => p.color && p.color !== myColor).map((p) => p.color);
       renderColorSelect(taken);
+    }
+    if (!screens.waiting.classList.contains('hidden')) {
+      renderWaitingRoom(state);
     }
     return;
   }
@@ -824,16 +870,35 @@ function commitOnlineState(state) {
 }
 
 // --- Shared dice animation -----------------------------------------------------
+// Classic 3x3 pip layout (grid positions numbered 1-9, left-to-right,
+// top-to-bottom) - which pips are lit for each face value.
+const DICE_PIPS = {
+  1: [5],
+  2: [1, 9],
+  3: [1, 5, 9],
+  4: [1, 3, 7, 9],
+  5: [1, 3, 5, 7, 9],
+  6: [1, 3, 4, 6, 7, 9],
+};
+const dicePipEls = Array.from(diceFace.querySelectorAll('.pip'));
+
+function setDiceFace(value) {
+  const lit = new Set(DICE_PIPS[value] || []);
+  dicePipEls.forEach((pip) => {
+    pip.classList.toggle('on', lit.has(Number(pip.dataset.pip)));
+  });
+}
+
 function animateDiceRoll(finalValue, onDone) {
   diceFace.classList.add('dice-rolling');
   let ticks = 0;
   const spin = setInterval(() => {
-    diceFace.textContent = String(1 + Math.floor(Math.random() * 6));
+    setDiceFace(1 + Math.floor(Math.random() * 6));
     ticks++;
     if (ticks > 6) {
       clearInterval(spin);
       diceFace.classList.remove('dice-rolling');
-      diceFace.textContent = finalValue;
+      setDiceFace(finalValue);
       if (onDone) onDone();
     }
   }, 60);
@@ -861,7 +926,7 @@ function applyState(state) {
   }
 
   const isMyTurn = state.turn === myColor;
-  btnDice.disabled = !(isMyTurn && state.dice === null && !state.winner);
+  btnDice.disabled = !(isMyTurn && state.dice === null && !state.rolling && !state.winner);
 
   if (state.winner) {
     const winnerPlayer = state.players.find((p) => p.color === state.winner);
@@ -878,7 +943,25 @@ function applyState(state) {
   }
 
   updateTurnBanner(state);
+  updateBoardLabels(state);
   drawBoard(state);
+}
+
+// Small name chips above/below the board, one per active color, positioned
+// to match that color's corner (Rot/Grün top, Blau/Gelb bottom).
+function updateBoardLabels(state) {
+  const active = new Set(activeColorsOf(state));
+  ALL_COLORS.forEach((color) => {
+    const el = boardLabelEls[color];
+    const player = state.players.find((p) => p.color === color);
+    if (!active.has(color) || !player) {
+      el.classList.add('hidden');
+      return;
+    }
+    el.textContent = player.isBot ? `🤖 ${player.name}` : player.name;
+    el.style.color = COLOR_HEX[color];
+    el.classList.remove('hidden');
+  });
 }
 
 // --- Opponent HUD cards (built dynamically - 1 to 3, one per active color) ----
@@ -904,7 +987,7 @@ function ensureHudCards(state) {
     card.className = 'hud-card';
     card.innerHTML =
       '<div class="hud-info">' +
-        `<div class="hud-avatar" style="background:${COLOR_HEX[color]}">?</div>` +
+        `<div class="hud-avatar" style="background:${COLOR_HEX[color]};border-color:${COLOR_DARK[color]}">?</div>` +
         '<div>' +
           '<div class="hud-name">Gegner</div>' +
           '<div class="hud-coins"></div>' +
@@ -946,6 +1029,7 @@ function updateHud(state) {
   const me = state.players.find((p) => p.color === myColor) || {};
   avatarMeEl.textContent = (me.name || '?').charAt(0).toUpperCase();
   avatarMeEl.style.background = myColor ? COLOR_HEX[myColor] : '#555';
+  avatarMeEl.style.borderColor = myColor ? COLOR_DARK[myColor] : 'rgba(255,255,255,0.4)';
   hudMeNameEl.textContent = me.name || 'Du';
   hudMeCoinsEl.textContent = `🪙 ${formatBC(getCoins())}`;
   updateTeamBadge(hudMeEl, hudMeTeamEl, isTeamMode ? me.team : null);
@@ -1200,6 +1284,7 @@ function startSoloGame(chosenColor, botCount) {
     ],
     turn: chosenColor,
     dice: null,
+    rolling: false,
     validMoves: [],
     sixStreak: 0,
     tokens,
@@ -1234,12 +1319,29 @@ function localAdvanceTurn() {
 // Mirrors the server's hard per-turn timer for solo mode: gives the human a
 // fresh window on every turn start and force-skips them if it runs out.
 function startLocalTurnWindow() {
-  localState.turnDeadline = Date.now() + TURN_TIME_LIMIT_MS;
   if (localTurnTimeoutHandle) clearTimeout(localTurnTimeoutHandle);
   localTurnTimeoutHandle = null;
+  if (botWatchdogHandle) clearTimeout(botWatchdogHandle);
+  botWatchdogHandle = null;
+
   if (localState.turn === myColor) {
+    localState.turnDeadline = Date.now() + TURN_TIME_LIMIT_MS;
     localTurnTimeoutHandle = setTimeout(handleLocalTurnTimeout, TURN_TIME_LIMIT_MS);
+    return;
   }
+
+  localState.turnDeadline = null;
+  // maybeScheduleAiTurn() is what normally rolls for a bot within 1-2s, but
+  // as a safety net - matching the server's own handleTurnTimeout fallback
+  // for online bots - force a roll if this exact turn is ever still waiting
+  // after the same hard limit a human gets.
+  const turnAtSchedule = localState.turn;
+  botWatchdogHandle = setTimeout(() => {
+    if (gameMode === 'solo' && localState && !localState.winner &&
+        localState.turn === turnAtSchedule && localState.dice === null && !localState.rolling) {
+      localRollDice();
+    }
+  }, TURN_TIME_LIMIT_MS);
 }
 
 function handleLocalTurnTimeout() {
@@ -1272,11 +1374,18 @@ function playerLabel(color) {
 }
 
 function localRollDice() {
-  if (gameMode !== 'solo' || !localState || localState.winner || localState.dice !== null) return;
+  // `rolling` closes the window between clicking/scheduling a roll and the
+  // dice animation actually resolving (~400ms) - localState.dice itself only
+  // gets set at the end of that window, so without this a second trigger
+  // (e.g. the bot watchdog firing right as maybeScheduleAiTurn's own timer
+  // also fires) could sneak in, double-roll, and leave the turn stuck.
+  if (gameMode !== 'solo' || !localState || localState.winner || localState.dice !== null || localState.rolling) return;
+  localState.rolling = true;
   const color = localState.turn;
   const value = 1 + Math.floor(Math.random() * 6);
 
   animateDiceRoll(value, () => {
+    localState.rolling = false;
     localState.sixStreak = value === 6 ? localState.sixStreak + 1 : 0;
 
     if (localState.sixStreak === 3) {
@@ -1311,7 +1420,9 @@ function localRollDice() {
 }
 
 function localMoveToken(tokenIndex) {
-  if (gameMode !== 'solo' || !localState || localState.winner) return;
+  // isAnimating guards against a second move (e.g. a re-triggered aiMakeMove)
+  // landing while the previous one is still gliding to its cell.
+  if (gameMode !== 'solo' || !localState || localState.winner || isAnimating) return;
   const color = localState.turn;
   if (localState.dice === null || !localState.validMoves.includes(tokenIndex)) return;
 
@@ -1416,8 +1527,8 @@ function drawCell(row, col, fill, opts = {}) {
   const { x, y, w, h } = cellRect(row, col);
   ctx.fillStyle = fill;
   ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = opts.border || 'rgba(0,0,0,0.15)';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = opts.border || 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = opts.borderWidth || 1.5;
   ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
 }
 
@@ -1437,11 +1548,12 @@ function drawBoard(state) {
   ctx.fillStyle = '#1e1b4b';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Corner yards (6x6), one per active color
-  if (activeColors.includes('red')) drawYard(0, 0, COLOR_DARK.red, LIGHT_TINT.red);       // top-left
-  if (activeColors.includes('green')) drawYard(0, 9, COLOR_DARK.green, LIGHT_TINT.green);   // top-right
-  if (activeColors.includes('yellow')) drawYard(9, 9, COLOR_DARK.yellow, LIGHT_TINT.yellow); // bottom-right
-  if (activeColors.includes('blue')) drawYard(9, 0, COLOR_DARK.blue, LIGHT_TINT.blue);     // bottom-left
+  // Corner yards (6x6), one per active color - bold solid color with a
+  // classic white "tray" inset holding the 4 base slots.
+  if (activeColors.includes('red')) drawYard(0, 0, 'red');       // top-left
+  if (activeColors.includes('green')) drawYard(0, 9, 'green');   // top-right
+  if (activeColors.includes('yellow')) drawYard(9, 9, 'yellow'); // bottom-right
+  if (activeColors.includes('blue')) drawYard(9, 0, 'blue');     // bottom-left
 
   // Ring path cells
   RING_PATH.forEach(([r, c], idx) => {
@@ -1467,17 +1579,24 @@ function drawBoard(state) {
   // Center home triangle
   drawCenter();
 
-  // Base slots (dashed circles) for waiting tokens
+  // Base slots: solid colored "sockets" set into the yard's white tray,
+  // classic Ludo-board look (replaces the previous plain dashed circles).
   activeColors.forEach((color) => {
     BASE_SPOTS[color].forEach(([r, c]) => {
       const { x, y, w, h } = cellRect(r, c);
+      const cx = x + w / 2;
+      const cy = y + h / 2;
       ctx.beginPath();
-      ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-      ctx.lineWidth = 2;
-      ctx.arc(x + w / 2, y + h / 2, w * 0.32, 0, Math.PI * 2);
+      ctx.arc(cx, cy, w * 0.34, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.12)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(cx, cy, w * 0.3, 0, Math.PI * 2);
+      ctx.fillStyle = LIGHT_TINT[color];
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = COLOR_DARK[color];
       ctx.stroke();
-      ctx.setLineDash([]);
     });
   });
 
@@ -1485,14 +1604,23 @@ function drawBoard(state) {
   drawParticles();
 }
 
-function drawYard(rowStart, colStart, bg, accent) {
+function drawYard(rowStart, colStart, color) {
   const { x, y } = cellRect(rowStart, colStart);
   const size = CELL * 6;
-  const grad = ctx.createLinearGradient(x, y, x + size, y + size);
-  grad.addColorStop(0, bg);
-  grad.addColorStop(1, accent);
-  ctx.fillStyle = grad;
-  roundRect(ctx, x + 4, y + 4, size - 8, size - 8, 18);
+
+  // Bold solid-color outer panel with a darker rim, instead of the previous
+  // muted dark-to-light gradient - a clearer, more "classic board" look.
+  roundRect(ctx, x + 3, y + 3, size - 6, size - 6, 20);
+  ctx.fillStyle = COLOR_HEX[color];
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = COLOR_DARK[color];
+  ctx.stroke();
+
+  // White inner "tray" that holds the base slots, like a real board.
+  const inset = size * 0.16;
+  roundRect(ctx, x + inset, y + inset, size - inset * 2, size - inset * 2, 14);
+  ctx.fillStyle = 'rgba(255,255,255,0.94)';
   ctx.fill();
 }
 
@@ -1606,51 +1734,68 @@ function drawParticles() {
 // --- Pawn rendering ("Mensch ärgere dich nicht" style: round head + cone body) --
 function drawPawn(cx, cy, radius, color) {
   const bodyHalfBottom = radius * 0.95;
-  const bodyHalfTop = radius * 0.5;
-  const bodyBottomY = cy + radius * 0.85;
-  const bodyTopY = cy - radius * 0.05;
-  const headCy = cy - radius * 0.75;
-  const headR = radius * 0.58;
+  const bodyHalfTop = radius * 0.42;
+  const bodyBottomY = cy + radius * 0.9;
+  const bodyTopY = cy - radius * 0.12;
+  const collarHalfWidth = radius * 0.52;
+  const headCy = cy - radius * 0.78;
+  const headR = radius * 0.55;
 
   // ground shadow
   ctx.beginPath();
-  ctx.ellipse(cx, bodyBottomY, bodyHalfBottom * 1.05, radius * 0.22, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.ellipse(cx, bodyBottomY + radius * 0.05, bodyHalfBottom * 1.1, radius * 0.24, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.32)';
   ctx.fill();
 
-  // conical/cylindrical body
+  // Body: curved (not straight) taper for a turned-wood peg silhouette,
+  // with a left-to-right gradient that reads as a lit cylinder.
   ctx.beginPath();
   ctx.moveTo(cx - bodyHalfBottom, bodyBottomY);
-  ctx.lineTo(cx + bodyHalfBottom, bodyBottomY);
+  ctx.quadraticCurveTo(cx - bodyHalfBottom * 0.85, cy + radius * 0.15, cx - bodyHalfTop, bodyTopY);
   ctx.lineTo(cx + bodyHalfTop, bodyTopY);
-  ctx.lineTo(cx - bodyHalfTop, bodyTopY);
+  ctx.quadraticCurveTo(cx + bodyHalfBottom * 0.85, cy + radius * 0.15, cx + bodyHalfBottom, bodyBottomY);
   ctx.closePath();
-  const bodyGrad = ctx.createLinearGradient(cx, bodyTopY, cx, bodyBottomY);
-  bodyGrad.addColorStop(0, LIGHT_TINT[color]);
-  bodyGrad.addColorStop(1, COLOR_HEX[color]);
+  const bodyGrad = ctx.createLinearGradient(cx - bodyHalfBottom, 0, cx + bodyHalfBottom, 0);
+  bodyGrad.addColorStop(0, COLOR_DARK[color]);
+  bodyGrad.addColorStop(0.32, COLOR_HEX[color]);
+  bodyGrad.addColorStop(0.52, LIGHT_TINT[color]);
+  bodyGrad.addColorStop(0.72, COLOR_HEX[color]);
+  bodyGrad.addColorStop(1, COLOR_DARK[color]);
   ctx.fillStyle = bodyGrad;
   ctx.fill();
-  ctx.lineWidth = Math.max(1, radius * 0.14);
+  ctx.lineWidth = Math.max(1, radius * 0.1);
   ctx.strokeStyle = COLOR_DARK[color];
   ctx.stroke();
 
-  // round head
+  // Collar ring where body meets head - the "turned wood peg" detail line.
+  ctx.beginPath();
+  ctx.ellipse(cx, bodyTopY, collarHalfWidth, radius * 0.12, 0, 0, Math.PI * 2);
+  ctx.fillStyle = COLOR_DARK[color];
+  ctx.fill();
+
+  // Glossy round head
   ctx.beginPath();
   ctx.arc(cx, headCy, headR, 0, Math.PI * 2);
-  const headGrad = ctx.createRadialGradient(cx - headR * 0.3, headCy - headR * 0.3, headR * 0.1, cx, headCy, headR);
-  headGrad.addColorStop(0, LIGHT_TINT[color]);
-  headGrad.addColorStop(1, COLOR_HEX[color]);
+  const headGrad = ctx.createRadialGradient(cx - headR * 0.35, headCy - headR * 0.35, headR * 0.08, cx, headCy, headR * 1.05);
+  headGrad.addColorStop(0, '#ffffff');
+  headGrad.addColorStop(0.25, LIGHT_TINT[color]);
+  headGrad.addColorStop(0.75, COLOR_HEX[color]);
+  headGrad.addColorStop(1, COLOR_DARK[color]);
   ctx.fillStyle = headGrad;
   ctx.fill();
-  ctx.lineWidth = Math.max(1, radius * 0.14);
+  ctx.lineWidth = Math.max(1, radius * 0.1);
   ctx.strokeStyle = COLOR_DARK[color];
   ctx.stroke();
 
-  // shine highlight
+  // Shine highlight (elongated, glossier than a plain circle)
+  ctx.save();
+  ctx.translate(cx - headR * 0.3, headCy - headR * 0.35);
+  ctx.rotate(-0.5);
   ctx.beginPath();
-  ctx.arc(cx - headR * 0.35, headCy - headR * 0.35, headR * 0.28, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.ellipse(0, 0, headR * 0.32, headR * 0.2, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
   ctx.fill();
+  ctx.restore();
 }
 
 // --- Token positioning & drawing -----------------------------------------------

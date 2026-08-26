@@ -109,29 +109,21 @@ function advanceTurn(room) {
   room.turnIndex = (room.turnIndex + 1) % n;
 }
 
-function pickAvailableColor(room) {
-  const taken = room.players.filter((p) => p.color).map((p) => p.color);
-  const pool = COLORS_ALL.filter((c) => !taken.includes(c));
-  return pool[Math.floor(Math.random() * pool.length)];
-}
-
-// Fills the remaining lobby slots (up to `count`) with bot players, each
-// immediately assigned a free color so the lobby shows them as taken.
-function addBotPlayers(room, count) {
-  for (let i = 0; i < count; i++) {
-    const botNumber = room.players.filter((p) => p.isBot).length + 1;
-    room.players.push({
-      id: `bot-${crypto.randomUUID()}`,
-      playerId: crypto.randomUUID(),
-      userId: null,
-      name: `Boom-Bot ${botNumber}`,
-      color: pickAvailableColor(room),
-      isBot: true,
-      connected: true,
-      coins: null,
-      disconnectTimerHandle: null,
-    });
-  }
+// Adds one bot to a specific free color - used when the host fills an empty
+// lobby slot on demand (see the 'addBot' handler), never automatically.
+function addBotPlayer(room, color) {
+  const botNumber = room.players.filter((p) => p.isBot).length + 1;
+  room.players.push({
+    id: `bot-${crypto.randomUUID()}`,
+    playerId: crypto.randomUUID(),
+    userId: null,
+    name: `Boom-Bot ${botNumber}`,
+    color,
+    isBot: true,
+    connected: true,
+    coins: null,
+    disconnectTimerHandle: null,
+  });
 }
 
 function computeValidMoves(tokens, diceValue) {
@@ -204,6 +196,7 @@ function publicState(room) {
   return {
     code: room.code,
     mode: room.mode,
+    maxPlayers: room.maxPlayers,
     stake: room.stake,
     activeColors: room.activeColors,
     players: room.players.map((p) => ({
@@ -235,6 +228,17 @@ function resetTurnTimer(room) {
   room.turnDeadline = Date.now() + TURN_TIME_LIMIT_MS;
   room.turnTimerHandle = setTimeout(() => handleTurnTimeout(room), TURN_TIME_LIMIT_MS);
   scheduleBotTurnIfNeeded(room);
+}
+
+// Starts the game the moment every seat (human or bot) has a color - shared
+// by a human's own pick and the host filling a seat with a bot.
+function maybeStartGame(room) {
+  const allChosen = room.players.length === room.maxPlayers && room.players.every((p) => p.color);
+  if (!allChosen) return;
+  room.started = true;
+  room.turnIndex = 0;
+  room.activeColors = room.players.map((p) => p.color);
+  resetTurnTimer(room);
 }
 
 function clearTurnTimer(room) {
@@ -658,10 +662,9 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('createRoom', ({ name, stake, coins, mode, botCount }) => {
+  socket.on('createRoom', ({ name, stake, coins, mode }) => {
     const resolvedMode = mode === 'mp2v2' ? 'mp2v2' : 'mp1v1';
     const maxPlayers = resolvedMode === 'mp2v2' ? 4 : 2;
-    const clampedBotCount = Math.max(0, Math.min(maxPlayers - 1, parseInt(botCount, 10) || 0));
 
     const code = generateRoomCode();
     const playerId = crypto.randomUUID();
@@ -693,11 +696,10 @@ io.on('connection', (socket) => {
       turnDeadline: null,
       turnTimerHandle: null,
     };
-    addBotPlayers(room, clampedBotCount);
     rooms.set(code, room);
     socket.join(code);
     socket.data.roomCode = code;
-    socket.emit('roomCreated', { code, playerId, state: publicState(room) });
+    socket.emit('roomCreated', { code, playerId, isHost: true, state: publicState(room) });
   });
 
   socket.on('joinRoom', ({ code, name, coins }) => {
@@ -724,7 +726,7 @@ io.on('connection', (socket) => {
     });
     socket.join(room.code);
     socket.data.roomCode = room.code;
-    socket.emit('roomJoined', { playerId, state: publicState(room) });
+    socket.emit('roomJoined', { playerId, isHost: false, state: publicState(room) });
     broadcastState(room);
   });
 
@@ -751,7 +753,8 @@ io.on('connection', (socket) => {
     socket.data.roomCode = room.code;
     socket.data.playerId = playerId;
 
-    socket.emit('rejoined', { state: publicState(room), color: player.color, stake: room.stake });
+    const isHost = room.players[0] === player;
+    socket.emit('rejoined', { state: publicState(room), color: player.color, stake: room.stake, isHost });
     broadcastState(room);
   });
 
@@ -770,16 +773,30 @@ io.on('connection', (socket) => {
     }
 
     player.color = color;
-
-    const allChosen = room.players.length === room.maxPlayers && room.players.every((p) => p.color);
-    if (allChosen) {
-      room.started = true;
-      room.turnIndex = 0;
-      room.activeColors = room.players.map((p) => p.color);
-      resetTurnTimer(room);
-    }
+    maybeStartGame(room);
 
     socket.emit('colorConfirmed', { color, state: publicState(room) });
+    broadcastState(room);
+  });
+
+  // Lets the host fill a free color slot with a bot on demand (e.g. not
+  // enough friends showed up) - never automatic, and only the room's
+  // creator may do it.
+  socket.on('addBot', ({ color }) => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || room.started) return;
+    if (!COLORS_ALL.includes(color)) return;
+    const isHost = room.players[0] && room.players[0].id === socket.id;
+    if (!isHost) return;
+    if (room.players.length >= room.maxPlayers) return;
+    const takenByOther = room.players.some((p) => p.color === color);
+    if (takenByOther) {
+      socket.emit('errorMsg', 'Diese Farbe ist bereits vergeben.');
+      return;
+    }
+
+    addBotPlayer(room, color);
+    maybeStartGame(room);
     broadcastState(room);
   });
 

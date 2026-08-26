@@ -80,6 +80,64 @@
   .team-badge.team-a { background: rgba(245, 158, 11, 0.25); color: #fcd34d; }
   .team-badge.team-b { background: rgba(34, 211, 238, 0.25); color: #67e8f9; }
 
+  .waiting-slot {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.75rem;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  .waiting-slot-swatch {
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: 9999px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  .waiting-slot-label { flex: 1; font-size: 0.85rem; font-weight: 600; color: #e0e7ff; }
+  .waiting-slot-add-bot {
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 0.35rem 0.6rem;
+    border-radius: 0.6rem;
+    background: rgba(255,255,255,0.15);
+    transition: background 0.15s ease;
+  }
+  .waiting-slot-add-bot:hover { background: rgba(255,255,255,0.28); }
+
+  /* Classic dice face: 3x3 grid of pips (dots), toggled on/off per value */
+  .dice-face {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    gap: 3px;
+    padding: 9px;
+  }
+  .dice-face .pip {
+    border-radius: 9999px;
+    background: transparent;
+  }
+  .dice-face .pip.on {
+    background: radial-gradient(circle at 35% 30%, #4b5563, #111827);
+    box-shadow: inset 0 1px 1px rgba(255,255,255,0.15), 0 1px 1px rgba(0,0,0,0.3);
+  }
+
+  .board-label-chip {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 800;
+    padding: 0.15rem 0.6rem;
+    border-radius: 9999px;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.2);
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .hud-card {
     display: flex;
     align-items: center;
@@ -110,7 +168,7 @@
     color: white;
     box-shadow: 0 3px 10px rgba(0,0,0,0.35);
     flex-shrink: 0;
-    border: 2px solid rgba(255,255,255,0.4);
+    border: 3px solid rgba(255,255,255,0.4);
   }
   .hud-name { font-weight: 700; font-size: 0.88rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 8rem; }
   .hud-coins { font-size: 0.72rem; color: #fde68a; font-weight: 600; }
@@ -410,16 +468,6 @@
         </div>
 
         <div>
-          <label class="block text-sm font-medium text-indigo-200 mb-1">KI-Plätze auffüllen</label>
-          <select id="bot-count-select"
-            class="w-full rounded-xl px-4 py-3 bg-white/90 text-gray-900 font-semibold focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
-            <option value="0" selected>0 – auf Mitspieler warten</option>
-            <option value="1">1 KI-Gegner</option>
-          </select>
-          <p class="text-xs text-indigo-300 mt-1">Nicht besetzte Plätze warten auf Mitspieler per Raum-Code.</p>
-        </div>
-
-        <div>
           <label class="block text-sm font-medium text-indigo-200 mb-1">Einsatz (Buy-in)</label>
           <select id="stake-select"
             class="w-full rounded-xl px-4 py-3 bg-white/90 text-gray-900 font-semibold focus:outline-none focus:ring-2 focus:ring-fuchsia-400">
@@ -500,13 +548,18 @@
     <!-- WAITING ROOM -->
     <section id="waiting" class="hidden w-full max-w-md text-center">
       <div class="bg-white/10 backdrop-blur-lg rounded-2xl shadow-2xl p-8 border border-white/20">
-        <p class="text-indigo-200 mb-2">Warte auf einen zweiten Spieler...</p>
+        <p class="text-indigo-200 mb-2">Warte auf weitere Mitspieler...</p>
         <p id="waiting-stake" class="text-xs text-indigo-300 mb-2"></p>
         <p class="text-sm text-indigo-300 mb-4">Teile diesen Code:</p>
         <div id="waiting-code" class="text-5xl font-black tracking-[0.3em] bg-black/30 rounded-xl py-4 mb-4 select-all"></div>
         <button id="btn-copy-code" class="px-4 py-2 rounded-lg bg-white/20 hover:bg-white/30 text-sm font-semibold transition">
           📋 Code kopieren
         </button>
+
+        <!-- Live slot list: who's in, who's a bot, and (host only) buttons
+             to fill any still-free color with a bot. -->
+        <div id="waiting-slots" class="mt-5 space-y-2 text-left"></div>
+
         <div class="mt-6 flex justify-center">
           <div class="w-8 h-8 border-4 border-fuchsia-400 border-t-transparent rounded-full animate-spin"></div>
         </div>
@@ -536,8 +589,20 @@
         Warte... <span id="turn-timer" class="ml-1"></span>
       </div>
 
+      <!-- Player-name labels for the two top-corner colors (Rot/Grün) -->
+      <div id="board-labels-top" class="w-full max-w-[85vw] flex justify-between px-2">
+        <span id="board-label-red" class="board-label-chip hidden"></span>
+        <span id="board-label-green" class="board-label-chip hidden"></span>
+      </div>
+
       <div class="relative bg-white/5 rounded-2xl p-2 border border-white/20 shadow-2xl">
         <canvas id="board-canvas" width="600" height="600" class="rounded-xl max-w-[85vw] max-h-[70vh] touch-manipulation"></canvas>
+      </div>
+
+      <!-- Player-name labels for the two bottom-corner colors (Blau/Gelb) -->
+      <div id="board-labels-bottom" class="w-full max-w-[85vw] flex justify-between px-2">
+        <span id="board-label-blue" class="board-label-chip hidden"></span>
+        <span id="board-label-yellow" class="board-label-chip hidden"></span>
       </div>
 
       <!-- My HUD card (bottom) -->
@@ -553,8 +618,16 @@
         <div id="dice-slot-me" class="dice-slot">
           <div id="dice-widget">
             <button id="btn-dice" class="flex flex-col items-center gap-1 group" disabled>
-              <div id="dice-face" class="w-16 h-16 rounded-2xl bg-white text-gray-900 flex items-center justify-center text-3xl font-black shadow-xl border-4 border-white/50 group-active:scale-90 transition group-disabled:opacity-40">
-                🎲
+              <div id="dice-face" class="dice-face w-16 h-16 rounded-2xl bg-white shadow-xl border-4 border-white/50 group-active:scale-90 transition group-disabled:opacity-40">
+                <span class="pip" data-pip="1"></span>
+                <span class="pip" data-pip="2"></span>
+                <span class="pip" data-pip="3"></span>
+                <span class="pip" data-pip="4"></span>
+                <span class="pip" data-pip="5"></span>
+                <span class="pip" data-pip="6"></span>
+                <span class="pip" data-pip="7"></span>
+                <span class="pip" data-pip="8"></span>
+                <span class="pip" data-pip="9"></span>
               </div>
               <span class="text-xs text-indigo-200">Würfeln</span>
             </button>
