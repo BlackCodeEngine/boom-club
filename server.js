@@ -57,6 +57,15 @@ const DEFAULT_STAKE = 1000;
 const TURN_TIME_LIMIT_MS = 15000;
 const RECONNECT_GRACE_MS = 30000;
 
+// ---------------------------------------------------------------------------
+// XP / level progression (persisted to `profiles`, bonus items in `player_items`)
+// ---------------------------------------------------------------------------
+const XP_PER_LEVEL = 1000; // XP needed per level - adjust freely
+const XP_WIN = 200;
+const XP_LOSS = 10;
+const LEVEL_UP_COINS_REWARD = 10000;
+const ITEM_LEVEL_INTERVAL = 5; // every 5th level grants a free dice
+
 function createInitialTokens() {
   const tokens = {};
   COLORS_ALL.forEach((c) => { tokens[c] = [-1, -1, -1, -1]; });
@@ -189,6 +198,68 @@ function broadcastState(room, extra) {
   io.to(room.code).emit('state', { ...publicState(room), ...(extra || {}) });
 }
 
+function levelForXp(xp) {
+  return Math.floor(xp / XP_PER_LEVEL) + 1;
+}
+
+// Credits XP to a logged-in player's profile after an online game, applies
+// any level-up coin bonus / free-dice milestone, and tells that player's
+// socket about it via 'xpGained'. Guests/bots (no userId) are skipped.
+async function awardXp(targetSocketId, userId, xpEarned) {
+  if (!supabaseAdmin || !userId) return;
+
+  const { data: profile, error } = await supabaseAdmin
+    .from('profiles')
+    .select('xp, level, coins')
+    .eq('id', userId)
+    .single();
+  if (error || !profile) {
+    console.error('[Supabase] Profil für XP-Update nicht gefunden:', error && error.message);
+    return;
+  }
+
+  const oldLevel = profile.level || 1;
+  const newXp = (profile.xp || 0) + xpEarned;
+  const newLevel = levelForXp(newXp);
+  const levelsGained = Math.max(0, newLevel - oldLevel);
+  const leveledUp = levelsGained > 0;
+  const coinsAwarded = levelsGained * LEVEL_UP_COINS_REWARD;
+  const newCoins = (profile.coins || 0) + coinsAwarded;
+
+  const { error: updateError } = await supabaseAdmin
+    .from('profiles')
+    .update({ xp: newXp, level: newLevel, coins: newCoins })
+    .eq('id', userId);
+  if (updateError) {
+    console.error('[Supabase] XP-Update fehlgeschlagen:', updateError.message);
+    return;
+  }
+
+  // Grants a free dice for every 5th-level milestone crossed by this XP gain.
+  let itemAwarded = null;
+  for (let lvl = oldLevel + 1; lvl <= newLevel; lvl++) {
+    if (lvl % ITEM_LEVEL_INTERVAL !== 0) continue;
+    itemAwarded = `Standard-Würfel Level ${lvl}`;
+    const { error: itemError } = await supabaseAdmin.from('player_items').insert({
+      user_id: userId,
+      item_type: 'dice',
+      item_name: itemAwarded,
+    });
+    if (itemError) {
+      console.error('[Supabase] Item konnte nicht vergeben werden:', itemError.message);
+    }
+  }
+
+  io.to(targetSocketId).emit('xpGained', {
+    xpEarned,
+    newXp,
+    newLevel,
+    leveledUp,
+    coinsAwarded,
+    itemAwarded,
+  });
+}
+
 io.on('connection', (socket) => {
   // --- Supabase Auth (email + password) ---------------------------------------
   socket.on('checkUsernameAvailable', async ({ username }) => {
@@ -278,6 +349,8 @@ io.on('connection', (socket) => {
       userId: user ? user.id : null,
       username: trimmedUsername,
       coins: 10000,
+      level: 1,
+      xp: 0,
       needsEmailConfirmation: !data.session,
       session: sessionPayload(data.session),
     });
@@ -306,7 +379,7 @@ io.on('connection', (socket) => {
     if (supabaseAdmin) {
       const { data: profileData, error: profileError } = await supabaseAdmin
         .from('profiles')
-        .select('username, coins')
+        .select('username, coins, level, xp')
         .eq('id', user.id)
         .single();
       if (profileError) {
@@ -321,6 +394,8 @@ io.on('connection', (socket) => {
       email: user.email,
       username: profile ? profile.username : null,
       coins: profile ? profile.coins : null,
+      level: profile ? profile.level : null,
+      xp: profile ? profile.xp : null,
       session: sessionPayload(data.session),
     });
   });
@@ -360,7 +435,7 @@ io.on('connection', (socket) => {
     if (supabaseAdmin) {
       const { data: profileData, error: profileError } = await supabaseAdmin
         .from('profiles')
-        .select('username, coins')
+        .select('username, coins, level, xp')
         .eq('id', user.id)
         .single();
       if (profileError) {
@@ -375,6 +450,8 @@ io.on('connection', (socket) => {
       email: user.email,
       username: profile ? profile.username : null,
       coins: profile ? profile.coins : null,
+      level: profile ? profile.level : null,
+      xp: profile ? profile.xp : null,
       session,
     });
   });
@@ -539,6 +616,10 @@ io.on('connection', (socket) => {
       room.winner = color;
       clearTurnTimer(room);
       broadcastState(room, { message: `${currentPlayer.name} hat gewonnen!`, moveInfo });
+
+      const loserPlayer = room.players.find((p) => p !== currentPlayer);
+      if (currentPlayer.userId) awardXp(currentPlayer.id, currentPlayer.userId, XP_WIN);
+      if (loserPlayer && loserPlayer.userId) awardXp(loserPlayer.id, loserPlayer.userId, XP_LOSS);
       return;
     }
 

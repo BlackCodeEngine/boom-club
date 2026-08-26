@@ -235,6 +235,15 @@
       <span class="text-xs text-indigo-200 font-semibold self-end mb-0.5">BC</span>
     </div>
 
+    <!-- LEVEL / XP PROGRESS (only shown while logged in) -->
+    <div id="level-bar" class="hidden w-full max-w-md flex items-center gap-3 mb-4 bg-white/10 backdrop-blur rounded-xl px-4 py-2 border border-white/20 shadow-lg">
+      <span class="text-xs font-black text-fuchsia-200 whitespace-nowrap">⭐ Level <span id="level-value">1</span></span>
+      <div class="flex-1 h-2 rounded-full bg-white/15 overflow-hidden">
+        <div id="xp-bar-fill" class="h-full bg-gradient-to-r from-fuchsia-400 to-amber-300" style="width:0%"></div>
+      </div>
+      <span id="xp-value" class="text-xs text-indigo-200 font-semibold whitespace-nowrap">0/1.000 XP</span>
+    </div>
+
     <!-- ACCOUNT (register / login / guest) - tropical beach-club lounge -->
     <section id="account" class="hidden w-full max-w-md">
       <div class="beach-card">
@@ -515,7 +524,8 @@
     <section id="gameover" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
       <div class="bg-gradient-to-br from-indigo-800 to-fuchsia-800 rounded-2xl p-8 text-center shadow-2xl border border-white/20 max-w-sm w-full mx-4 pop-in">
         <div class="text-6xl mb-4">🏆</div>
-        <h2 id="gameover-text" class="text-2xl font-extrabold mb-6">Spiel vorbei!</h2>
+        <h2 id="gameover-text" class="text-2xl font-extrabold mb-2">Spiel vorbei!</h2>
+        <p id="gameover-xp" class="hidden text-sm font-semibold text-amber-200 mb-6 pop-in"></p>
         <button id="btn-restart" class="px-6 py-3 rounded-xl bg-white text-indigo-900 font-bold shadow-lg active:scale-95 transition">
           Zurück zum Start
         </button>

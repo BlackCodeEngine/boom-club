@@ -123,6 +123,34 @@ function renderCoins() {
   coinsDisplayEl.textContent = formatBC(getCoins());
 }
 
+// --- Level / XP progress (persisted, synced from the server on login) --------
+// XP_PER_LEVEL only drives the local progress bar - the server (server.js)
+// is authoritative and must use the same value for the bar to line up.
+const LEVEL_KEY = 'boomclub_level';
+const XP_KEY = 'boomclub_xp';
+const XP_PER_LEVEL = 1000;
+
+function getLevel() {
+  const n = parseInt(localStorage.getItem(LEVEL_KEY), 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+function getXp() {
+  const n = parseInt(localStorage.getItem(XP_KEY), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function setLevelAndXp(level, xp) {
+  localStorage.setItem(LEVEL_KEY, String(Math.max(1, Math.round(level))));
+  localStorage.setItem(XP_KEY, String(Math.max(0, Math.round(xp))));
+  renderLevel();
+}
+function renderLevel() {
+  levelBarEl.classList.toggle('hidden', !loggedInUserId);
+  const xpIntoLevel = getXp() % XP_PER_LEVEL;
+  levelValueEl.textContent = String(getLevel());
+  xpValueEl.textContent = `${formatBC(xpIntoLevel)}/${formatBC(XP_PER_LEVEL)} XP`;
+  xpBarFillEl.style.width = `${(xpIntoLevel / XP_PER_LEVEL) * 100}%`;
+}
+
 // --- DOM references ---------------------------------------------------------
 const screens = {
   account: document.getElementById('account'),
@@ -164,6 +192,7 @@ const diceFace = document.getElementById('dice-face');
 const messageToast = document.getElementById('message-toast');
 const gameoverSection = document.getElementById('gameover');
 const gameoverText = document.getElementById('gameover-text');
+const gameoverXpEl = document.getElementById('gameover-xp');
 const btnRestart = document.getElementById('btn-restart');
 
 const btnNavSolo = document.getElementById('btn-nav-solo');
@@ -206,6 +235,10 @@ const loginSuccessEl = document.getElementById('login-success');
 const btnPlayGuest = document.getElementById('btn-play-guest');
 
 const coinsDisplayEl = document.getElementById('coins-display');
+const levelBarEl = document.getElementById('level-bar');
+const levelValueEl = document.getElementById('level-value');
+const xpBarFillEl = document.getElementById('xp-bar-fill');
+const xpValueEl = document.getElementById('xp-value');
 const stakeSelectEl = document.getElementById('stake-select');
 const waitingStakeEl = document.getElementById('waiting-stake');
 const reconnectBannerEl = document.getElementById('reconnect-banner');
@@ -232,8 +265,10 @@ let wasMyTurnPrev = null; // null = unknown/not yet in a game
 let audioCtx = null;
 
 let hasConnectedOnce = false;
+let loggedInUserId = null;
 
 renderCoins();
+renderLevel();
 
 btnRefreshApp.addEventListener('click', () => location.reload());
 
@@ -320,8 +355,6 @@ function showToast(msg) {
 // ===============================================================================
 // ACCOUNT SCREEN - register / login (Supabase Auth) or play as guest
 // ===============================================================================
-let loggedInUserId = null;
-
 function setAccountTab(tab) {
   const isRegister = tab === 'register';
   tabRegisterEl.classList.toggle('active', isRegister);
@@ -433,7 +466,7 @@ formLoginEl.addEventListener('submit', (evt) => {
   socket.emit('authLogin', { email, password });
 });
 
-socket.on('authRegistered', ({ username, coins, needsEmailConfirmation, session }) => {
+socket.on('authRegistered', ({ username, coins, needsEmailConfirmation, session, level, xp }) => {
   btnRegisterSubmit.disabled = false;
 
   if (needsEmailConfirmation) {
@@ -449,13 +482,14 @@ socket.on('authRegistered', ({ username, coins, needsEmailConfirmation, session 
   if (username) setPlayerName(username);
   if (typeof coins === 'number') setCoins(coins);
   if (session) saveSession(session);
+  setLevelAndXp(level || 1, xp || 0);
 
   registerSuccessEl.textContent = `🎉 Willkommen, ${username || 'Spieler'}! Dein Konto wurde erstellt.`;
   registerSuccessEl.classList.remove('hidden');
   setTimeout(() => showScreen('mainMenu'), 1200);
 });
 
-socket.on('authLoggedIn', ({ userId, username, coins, session }) => {
+socket.on('authLoggedIn', ({ userId, username, coins, session, level, xp }) => {
   hideReconnectBanner();
   btnLoginSubmit.disabled = false;
   loggedInUserId = userId;
@@ -463,10 +497,27 @@ socket.on('authLoggedIn', ({ userId, username, coins, session }) => {
   if (username) setPlayerName(username);
   if (typeof coins === 'number') setCoins(coins);
   if (session) saveSession(session);
+  setLevelAndXp(level || 1, xp || 0);
 
   loginSuccessEl.textContent = `🎉 Willkommen zurück${username ? ', ' + username : ''}!`;
   loginSuccessEl.classList.remove('hidden');
   setTimeout(() => showScreen('mainMenu'), 1000);
+});
+
+// Server-authoritative XP/level update after an online game (see 'moveToken'
+// win handling in server.js) - reflects the same values it just persisted to
+// the `profiles` table in Supabase.
+socket.on('xpGained', ({ xpEarned, newXp, newLevel, leveledUp, coinsAwarded, itemAwarded }) => {
+  setLevelAndXp(newLevel, newXp);
+  if (typeof coinsAwarded === 'number' && coinsAwarded > 0) addCoins(coinsAwarded);
+
+  let text = `+${formatBC(xpEarned)} XP`;
+  if (leveledUp) {
+    text += ` · 🎉 Level ${newLevel} erreicht! +${formatBC(coinsAwarded)} BC`;
+    if (itemAwarded) text += ` · + Gratis-Würfel!`;
+  }
+  gameoverXpEl.textContent = text;
+  gameoverXpEl.classList.remove('hidden');
 });
 
 // Session restore (silent, on page load) failed or expired - go back to a
@@ -536,6 +587,7 @@ function leaveAndGoToMenu() {
   if (localTurnTimeoutHandle) clearTimeout(localTurnTimeoutHandle);
   localTurnTimeoutHandle = null;
   gameoverSection.classList.add('hidden');
+  gameoverXpEl.classList.add('hidden');
   messageToast.textContent = '';
   drawBoard(null);
   showScreen('mainMenu');
@@ -1025,6 +1077,7 @@ function startSoloGame(chosenColor) {
   };
   wasMyTurnPrev = null;
   gameoverSection.classList.add('hidden');
+  gameoverXpEl.classList.add('hidden');
   messageToast.textContent = '';
   showScreen('game');
   startLocalTurnWindow();
